@@ -12,7 +12,9 @@ let state = {
     restaurants: {},
     reservations: {},
     idempotencyKeys: {},
-    exportState: null
+    exportState: null,
+    // For token management
+    tokens: {}
 };
 const app = express();
 app.use(express.json());
@@ -57,20 +59,19 @@ const authenticate = (req, res, next) => {
             }
         });
     }
-    // In a real implementation, we'd validate the token
-    // For now, we'll simulate authentication
     const token = authHeader.substring(7);
-    // For demo purposes, we'll just check if it's a valid UUID-like string
-    if (!token.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+    // Look up token in our server-side token store
+    const userId = state.tokens[token];
+    if (!userId) {
         return res.status(401).json({
             error: {
                 code: 'unauthenticated',
-                message: 'Invalid token'
+                message: 'Invalid or unknown token'
             }
         });
     }
-    // Simulate authenticated user (in real app, we'd decode the token)
-    req.user = { id: 'u_test_user' };
+    // Set the authenticated user
+    req.user = { id: userId };
     next();
 };
 // Error handling middleware
@@ -91,13 +92,147 @@ app.get('/health', (req, res) => {
 // Reset endpoint
 app.post('/_test/reset', async (req, res) => {
     const fixture = req.body;
+    
+    // Validate fixture data before making any changes
+    try {
+        // Validate users
+        if (fixture.users) {
+            for (const user of fixture.users) {
+                // Validate user ID length (should be <= 64 characters)
+                if (user.id && user.id.length > 64) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'User ID too long'
+                        }
+                    });
+                }
+                // Validate email format
+                if (user.email && !validateEmail(user.email)) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Invalid email format'
+                        }
+                    });
+                }
+                // Validate password if present
+                if (user.password && user.password.length < 8) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Password must be at least 8 characters'
+                        }
+                    });
+                }
+            }
+        }
+        
+        // Validate restaurants
+        if (fixture.restaurants) {
+            for (const restaurant of fixture.restaurants) {
+                // Validate restaurant ID length (should be <= 64 characters)
+                if (restaurant.id && restaurant.id.length > 64) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Restaurant ID too long'
+                        }
+                    });
+                }
+                // Validate required fields
+                if (!restaurant.name) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Restaurant missing name'
+                        }
+                    });
+                }
+                if (!restaurant.timezone) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Restaurant missing timezone'
+                        }
+                    });
+                }
+            }
+        }
+        
+        // Validate reservations
+        if (fixture.reservations) {
+            for (const reservation of fixture.reservations) {
+                // Validate reservation ID length (should be <= 64 characters)
+                if (reservation.id && reservation.id.length > 64) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Reservation ID too long'
+                        }
+                    });
+                }
+                // Validate reference format (should be 6 uppercase letters or digits)
+                if (reservation.reference && !reservation.reference.match(/^[A-Z0-9]{6}$/)) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Invalid reference format'
+                        }
+                    });
+                }
+                // Validate required fields
+                if (!reservation.restaurant_id) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Reservation missing restaurant_id'
+                        }
+                    });
+                }
+                if (!reservation.table_id) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Reservation missing table_id'
+                        }
+                    });
+                }
+                if (!reservation.starts_at_local) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Reservation missing starts_at_local'
+                        }
+                    });
+                }
+                if (reservation.party_size === undefined) {
+                    return res.status(422).json({
+                        error: {
+                            code: 'validation_failed',
+                            message: 'Reservation missing party_size'
+                        }
+                    });
+                }
+            }
+        }
+    } catch (validationErr) {
+        return res.status(422).json({
+            error: {
+                code: 'validation_failed',
+                message: 'Fixture validation failed'
+            }
+        });
+    }
+    
     // Clear current state
     state = {
         users: {},
         restaurants: {},
         reservations: {},
         idempotencyKeys: {},
-        exportState: null
+        exportState: null,
+        tokens: {} // Reset tokens as well
     };
     
     // Process users with proper async handling
@@ -118,6 +253,11 @@ app.post('/_test/reset', async (req, res) => {
                     password: undefined // Remove plaintext password
                 };
                 state.users[user.id] = newUser;
+                // Also generate and store a token for this user (for fixture users)
+                if (user.email) {
+                    const token = `token_${uuidv4().substring(0, 16)}`;
+                    state.tokens[token] = user.id;
+                }
             } catch (err) {
                 console.error('Failed to hash password during reset:', err);
                 throw err;
@@ -226,8 +366,10 @@ app.post('/auth/signup', (req, res) => {
             display_name
         };
         state.users[userId] = newUser;
-        // Generate a mock token for demonstration
+        // Generate a proper token and store it
         const token = `token_${uuidv4().substring(0, 16)}`;
+        // Store the token mapping
+        state.tokens[token] = userId;
         res.status(201).json({
             user_id: userId,
             display_name,
@@ -257,8 +399,10 @@ app.post('/auth/login', (req, res) => {
                 }
             });
         }
-        // Generate a mock token for demonstration
+        // Generate a proper token and store it
         const token = `token_${uuidv4().substring(0, 16)}`;
+        // Store the token mapping
+        state.tokens[token] = user.id;
         res.status(200).json({
             user_id: user.id,
             display_name: user.display_name,
@@ -307,9 +451,17 @@ app.get('/availability', (req, res) => {
             }
         });
     }
-    // Validate party size
+    // Validate party size - must be plain decimal digits only
+    if (!party_size || !/^[0-9]+$/.test(party_size)) {
+        return res.status(422).json({
+            error: {
+                code: 'validation_failed',
+                message: 'Invalid party size'
+            }
+        });
+    }
     const partySize = parseInt(party_size, 10);
-    if (isNaN(partySize) || partySize < 1) {
+    if (partySize < 1) {
         return res.status(422).json({
             error: {
                 code: 'validation_failed',
