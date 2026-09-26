@@ -1,11 +1,16 @@
-//!/usr/bin/env node
+#!/usr/bin/env node
+"use strict";
 // Tablekeeper Stage 1 Implementation
 // This is a Node.js/TypeScript implementation following the spec
-const express = require('express');
-const { v4: uuidv4 } = require('uuid');
-const bcrypt = require('bcrypt');
-const { DateTime, IANAZone } = require('luxon');
-const fs = require('fs');
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const uuid_1 = require("uuid");
+const bcrypt_1 = __importDefault(require("bcrypt"));
+const luxon_1 = require("luxon");
+const fs_1 = __importDefault(require("fs"));
 // In-memory storage (in production, this would be a database)
 let state = {
     users: {},
@@ -13,11 +18,10 @@ let state = {
     reservations: {},
     idempotencyKeys: {},
     exportState: null,
-    // For token management
     tokens: {}
 };
-const app = express();
-app.use(express.json());
+const app = (0, express_1.default)();
+app.use(express_1.default.json());
 // Helper functions
 const generateReference = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -76,7 +80,7 @@ const authenticate = (req, res, next) => {
 };
 // Error handling middleware
 const errorHandler = (err, req, res, next) => {
-    console.error('Unhandled error:', err.stack || err);
+    console.error(err);
     res.status(500).json({
         error: {
             code: 'internal_error',
@@ -84,227 +88,69 @@ const errorHandler = (err, req, res, next) => {
         }
     });
 };
-
-// Add global error handling to catch unhandled promise rejections
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-// Add global error handling to catch uncaught exceptions
-process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
-});
 // Routes
 // Health endpoint
 app.get('/health', (req, res) => {
     res.status(200).json({ status: 'ok' });
 });
 // Reset endpoint
-app.post('/_test/reset', async (req, res) => {
-    try {
-        const fixture = req.body;
-        
-        // Validate fixture data before making any changes
-        try {
-            // Validate users
-            if (fixture.users) {
-                for (const user of fixture.users) {
-                    // Validate user ID length (should be <= 64 characters)
-                    if (user.id && user.id.length > 64) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'User ID too long'
-                            }
-                        });
-                    }
-                    // Validate email format
-                    if (user.email && !validateEmail(user.email)) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Invalid email format'
-                            }
-                        });
-                    }
-                    // Validate password if present
-                    if (user.password && user.password.length < 8) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Password must be at least 8 characters'
-                            }
-                        });
-                    }
-                }
-            }
-            
-            // Validate restaurants
-            if (fixture.restaurants) {
-                for (const restaurant of fixture.restaurants) {
-                    // Validate restaurant ID length (should be <= 64 characters)
-                    if (restaurant.id && restaurant.id.length > 64) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Restaurant ID too long'
-                            }
-                        });
-                    }
-                    // Validate required fields
-                    if (!restaurant.name) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Restaurant missing name'
-                            }
-                        });
-                    }
-                    if (!restaurant.timezone) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Restaurant missing timezone'
-                            }
-                        });
-                    }
-                }
-            }
-            
-            // Validate reservations
-            if (fixture.reservations) {
-                for (const reservation of fixture.reservations) {
-                    // Validate reservation ID length (should be <= 64 characters)
-                    if (reservation.id && reservation.id.length > 64) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Reservation ID too long'
-                            }
-                        });
-                    }
-                    // Validate reference format (should be 6 uppercase letters or digits)
-                    if (reservation.reference && !reservation.reference.match(/^[A-Z0-9]{6}$/)) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Invalid reference format'
-                            }
-                        });
-                    }
-                    // Validate required fields
-                    if (!reservation.restaurant_id) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Reservation missing restaurant_id'
-                            }
-                        });
-                    }
-                    if (!reservation.table_id) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Reservation missing table_id'
-                            }
-                        });
-                    }
-                    if (!reservation.starts_at_local) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Reservation missing starts_at_local'
-                            }
-                        });
-                    }
-                    if (reservation.party_size === undefined) {
-                        return res.status(422).json({
-                            error: {
-                                code: 'validation_failed',
-                                message: 'Reservation missing party_size'
-                            }
-                        });
-                    }
-                }
-            }
-        } catch (validationErr) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Fixture validation failed'
-                }
-            });
-        }
-        
-        // Clear current state
-        state = {
-            users: {},
-            restaurants: {},
-            reservations: {},
-            idempotencyKeys: {},
-            exportState: null,
-            tokens: {} // Reset tokens as well
-        };
-        
-        // Process users with proper async handling
-        const userPromises = fixture.users.map(async (user) => {
-            // Hash the password if it's not already hashed
-            if (user.password && !user.password_hash) {
-                try {
-                    const saltRounds = 10;
-                    const hash = await new Promise((resolve, reject) => {
-                        bcrypt.hash(user.password, saltRounds, (err, hash) => {
-                            if (err) reject(err);
-                            else resolve(hash);
-                        });
-                    });
-                    const newUser = {
-                        ...user,
-                        password_hash: hash,
-                        password: undefined // Remove plaintext password
-                    };
-                    state.users[user.id] = newUser;
-                    // Also generate and store a token for this user (for fixture users)
-                    if (user.email) {
-                        const token = `token_${uuidv4().substring(0, 16)}`;
-                        state.tokens[token] = user.id;
-                    }
-                } catch (err) {
+app.post('/_test/reset', (req, res) => {
+    const fixture = req.body;
+    // Clear current state
+    state = {
+        users: {},
+        restaurants: {},
+        reservations: {},
+        idempotencyKeys: {},
+        exportState: null,
+        tokens: {} // Reset tokens as well
+    };
+    // Load fixture data
+    fixture.users.forEach(user => {
+        // Hash the password if it's not already hashed
+        if (user.password && !user.password_hash) {
+            // Hash password like in signup endpoint
+            const saltRounds = 10;
+            bcrypt_1.default.hash(user.password, saltRounds, (err, hash) => {
+                if (err) {
                     console.error('Failed to hash password during reset:', err);
-                    throw err;
+                    return res.status(500).json({
+                        error: {
+                            code: 'internal_error',
+                            message: 'Failed to hash password'
+                        }
+                    });
                 }
-            } else {
-                // User already has password_hash or no password
-                state.users[user.id] = user;
-            }
-        });
-        
-        try {
-            await Promise.all(userPromises);
-            fixture.restaurants.forEach(restaurant => {
-                state.restaurants[restaurant.id] = restaurant;
-            });
-            fixture.reservations.forEach(reservation => {
-                state.reservations[reservation.id] = reservation;
-            });
-            res.status(204).send();
-        } catch (err) {
-            return res.status(500).json({
-                error: {
-                    code: 'internal_error',
-                    message: 'Failed to process users during reset'
+                const newUser = {
+                    ...user,
+                    password_hash: hash,
+                    password: undefined // Remove plaintext password
+                };
+                state.users[user.id] = newUser;
+                // Also generate and store a token for this user (for fixture users)
+                if (user.email) {
+                    const token = `token_${(0, uuid_1.v4)().substring(0, 16)}`;
+                    state.tokens[token] = user.id;
                 }
             });
         }
-    } catch (error) {
-        console.error('Reset endpoint error:', error);
-        return res.status(500).json({
-            error: {
-                code: 'internal_error',
-                message: 'Internal server error'
+        else {
+            // User already has password_hash or no password
+            state.users[user.id] = user;
+            // Also generate and store a token for this user (for fixture users)
+            if (user.email) {
+                const token = `token_${(0, uuid_1.v4)().substring(0, 16)}`;
+                state.tokens[token] = user.id;
             }
-        });
-    }
+        }
+    });
+    fixture.restaurants.forEach(restaurant => {
+        state.restaurants[restaurant.id] = restaurant;
+    });
+    fixture.reservations.forEach(reservation => {
+        state.reservations[reservation.id] = reservation;
+    });
+    res.status(204).send();
 });
 // Export endpoint
 app.get('/_test/export', (req, res) => {
@@ -341,81 +187,61 @@ app.post('/_test/import', (req, res) => {
 });
 // Authentication endpoints
 app.post('/auth/signup', (req, res) => {
-    try {
-        // Validate that request body is an object
-        if (!req.body || typeof req.body !== 'object') {
-            return res.status(400).json({
-                error: {
-                    code: 'malformed_request',
-                    message: 'Malformed request body'
-                }
-            });
-        }
-        
-        const { email, password, display_name } = req.body;
-        // Validate inputs
-        if (!validateEmail(email)) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Invalid email format'
-                }
-            });
-        }
-        if (password.length < 8) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Password must be at least 8 characters'
-                }
-            });
-        }
-        if (state.users[email]) {
-            return res.status(409).json({
-                error: {
-                    code: 'email_taken',
-                    message: 'Email already registered'
-                }
-            });
-        }
-        // Hash password
-        const saltRounds = 10;
-        bcrypt.hash(password, saltRounds, (err, hash) => {
-            if (err) {
-                return res.status(500).json({
-                    error: {
-                        code: 'internal_error',
-                        message: 'Failed to hash password'
-                    }
-                });
-            }
-            const userId = `u_${uuidv4().substring(0, 12)}`;
-            const newUser = {
-                id: userId,
-                email,
-                password_hash: hash,
-                display_name
-            };
-            state.users[userId] = newUser;
-            // Generate a proper token and store it
-            const token = `token_${uuidv4().substring(0, 16)}`;
-            // Store the token mapping
-            state.tokens[token] = userId;
-            res.status(201).json({
-                user_id: userId,
-                display_name,
-                token
-            });
-        });
-    } catch (error) {
-        console.error('Signup error:', error);
-        return res.status(500).json({
+    const { email, password, display_name } = req.body;
+    // Validate inputs
+    if (!validateEmail(email)) {
+        return res.status(422).json({
             error: {
-                code: 'internal_error',
-                message: 'Internal server error'
+                code: 'validation_failed',
+                message: 'Invalid email format'
             }
         });
     }
+    if (password.length < 8) {
+        return res.status(422).json({
+            error: {
+                code: 'validation_failed',
+                message: 'Password must be at least 8 characters'
+            }
+        });
+    }
+    if (state.users[email]) {
+        return res.status(409).json({
+            error: {
+                code: 'email_taken',
+                message: 'Email already registered'
+            }
+        });
+    }
+    // Hash password
+    const saltRounds = 10;
+    bcrypt_1.default.hash(password, saltRounds, (err, hash) => {
+        if (err) {
+            return res.status(500).json({
+                error: {
+                    code: 'internal_error',
+                    message: 'Failed to hash password'
+                }
+            });
+        }
+        const userId = `u_${(0, uuid_1.v4)().substring(0, 12)}`;
+        const newUser = {
+            id: userId,
+            email,
+            password_hash: hash,
+            display_name
+        };
+        state.users[userId] = newUser;
+        // Generate a proper token and store it
+        const token = `token_${(0, uuid_1.v4)().substring(0, 16)}`;
+        // Store the token mapping
+        state.tokens[token] = userId;
+        res.status(201).json({
+            user_id: userId,
+            display_name,
+            token
+        });
+    });
 });
 app.post('/auth/login', (req, res) => {
     const { email, password } = req.body;
@@ -430,7 +256,7 @@ app.post('/auth/login', (req, res) => {
         });
     }
     // Compare password
-    bcrypt.compare(password, user.password_hash, (err, result) => {
+    bcrypt_1.default.compare(password, user.password_hash, (err, result) => {
         if (err || !result) {
             return res.status(401).json({
                 error: {
@@ -440,7 +266,7 @@ app.post('/auth/login', (req, res) => {
             });
         }
         // Generate a proper token and store it
-        const token = `token_${uuidv4().substring(0, 16)}`;
+        const token = `token_${(0, uuid_1.v4)().substring(0, 16)}`;
         // Store the token mapping
         state.tokens[token] = user.id;
         res.status(200).json({
@@ -472,98 +298,53 @@ app.get('/restaurants/:id', (req, res) => {
     res.status(200).json(restaurant);
 });
 app.get('/availability', (req, res) => {
-    try {
-        const { restaurant_id, date, party_size } = req.query;
-        // Validate required parameters
-        if (!restaurant_id || !date || !party_size) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Missing required parameters'
-                }
-            });
-        }
-        const restaurant = getRestaurantById(restaurant_id);
-        if (!restaurant) {
-            return res.status(404).json({
-                error: {
-                    code: 'not_found',
-                    message: 'Restaurant not found'
-                }
-            });
-        }
-        // Validate party size - must be plain decimal digits only
-        if (!party_size || !/^[0-9]+$/.test(party_size)) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Invalid party size'
-                }
-            });
-        }
-        const partySize = parseInt(party_size, 10);
-        if (partySize < 1) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Invalid party size'
-                }
-            });
-        }
-        
-        // Validate date format - must be YYYY-MM-DD
-        if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Invalid date format'
-                }
-            });
-        }
-        
-        // Try to parse the date to check if it's valid
-        const dateParts = date.split('-');
-        const year = parseInt(dateParts[0], 10);
-        const month = parseInt(dateParts[1], 10) - 1; // JS months are 0-indexed
-        const day = parseInt(dateParts[2], 10);
-        
-        // Basic date validation
-        if (year < 1000 || year > 9999 || month < 0 || month > 11 || day < 1 || day > 31) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Invalid date'
-                }
-            });
-        }
-        
-        // Get available slots
-        const slots = generateAvailableSlots(restaurant, date, partySize);
-        res.status(200).json({
-            restaurant_id,
-            date,
-            timezone: restaurant.timezone,
-            slots
-        });
-    } catch (error) {
-        console.error('Availability error:', error);
-        return res.status(500).json({
+    const { restaurant_id, date, party_size } = req.query;
+    // Validate required parameters
+    if (!restaurant_id || !date || !party_size) {
+        return res.status(422).json({
             error: {
-                code: 'internal_error',
-                message: 'Internal server error'
+                code: 'validation_failed',
+                message: 'Missing required parameters'
             }
         });
     }
+    const restaurant = getRestaurantById(restaurant_id);
+    if (!restaurant) {
+        return res.status(404).json({
+            error: {
+                code: 'not_found',
+                message: 'Restaurant not found'
+            }
+        });
+    }
+    // Validate party size
+    const partySize = parseInt(party_size, 10);
+    if (isNaN(partySize) || partySize < 1) {
+        return res.status(422).json({
+            error: {
+                code: 'validation_failed',
+                message: 'Invalid party size'
+            }
+        });
+    }
+    // Get available slots
+    const slots = generateAvailableSlots(restaurant, date, partySize);
+    res.status(200).json({
+        restaurant_id,
+        date,
+        timezone: restaurant.timezone,
+        slots
+    });
 });
 // Helper function to generate available slots
 const generateAvailableSlots = (restaurant, dateStr, partySize) => {
     // Parse the date
-    const targetDate = DateTime.fromISO(dateStr, { zone: 'UTC' });
+    const targetDate = luxon_1.DateTime.fromISO(dateStr, { zone: 'UTC' });
     if (!targetDate.isValid) {
         return [];
     }
     // Find opening hours for this day
-    const weekday = targetDate.toISOWeekday() === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][targetDate.toISOWeekday() - 1];
+    const weekday = targetDate.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][targetDate.weekday - 1];
     const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
     if (!openingHour) {
         return [];
@@ -573,22 +354,20 @@ const generateAvailableSlots = (restaurant, dateStr, partySize) => {
     const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
     const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
     // Create slots
-    let slotStart = DateTime.fromObject({
+    let slotStart = luxon_1.DateTime.fromObject({
         year: targetDate.year,
         month: targetDate.month,
         day: targetDate.day,
         hour: openHour,
-        minute: openMinute,
-        zone: restaurant.timezone
-    });
-    const slotEnd = DateTime.fromObject({
+        minute: openMinute
+    }, { zone: restaurant.timezone });
+    const slotEnd = luxon_1.DateTime.fromObject({
         year: targetDate.year,
         month: targetDate.month,
         day: targetDate.day,
         hour: closeHour,
-        minute: closeMinute,
-        zone: restaurant.timezone
-    });
+        minute: closeMinute
+    }, { zone: restaurant.timezone });
     const durationMinutes = restaurant.reservation_duration_minutes;
     const slotInterval = restaurant.slot_minutes;
     while (slotStart < slotEnd) {
@@ -619,8 +398,8 @@ const getAvailableTables = (restaurant, start, end, partySize) => {
         // Check existing reservations for this table
         for (const reservation of Object.values(state.reservations)) {
             if (reservation.table_id === table.id && reservation.status === 'confirmed') {
-                const resStart = DateTime.fromISO(reservation.starts_at);
-                const resEnd = DateTime.fromISO(reservation.ends_at);
+                const resStart = luxon_1.DateTime.fromISO(reservation.starts_at);
+                const resEnd = luxon_1.DateTime.fromISO(reservation.ends_at);
                 // Check for overlap
                 if (!(end <= resStart || start >= resEnd)) {
                     isAvailable = false;
@@ -636,209 +415,197 @@ const getAvailableTables = (restaurant, start, end, partySize) => {
 };
 // Protected endpoints
 app.post('/reservations', authenticate, (req, res) => {
-    try {
-        const { restaurant_id, table_id, starts_at_local, party_size } = req.body;
-        const userId = req.user.id;
-        // Validate required fields
-        if (!restaurant_id || !table_id || !starts_at_local || party_size === undefined) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Missing required fields'
-                }
-            });
-        }
-        // Validate time format
-        if (!validateTimeFormat(starts_at_local)) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Invalid time format'
-                }
-            });
-        }
-        // Validate party size
-        if (typeof party_size !== 'number' || party_size < 1 || !Number.isInteger(party_size)) {
-            return res.status(422).json({
-                error: {
-                    code: 'validation_failed',
-                    message: 'Invalid party size'
-                }
-            });
-        }
-        // Validate idempotency key
-        const idempotencyKey = req.headers['idempotency-key'];
-        if (!idempotencyKey) {
-            return res.status(400).json({
-                error: {
-                    code: 'missing_idempotency_key',
-                    message: 'Idempotency key is required'
-                }
-            });
-        }
-        // Check if key already used
-        const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
-        if (keyEntry) {
-            // If same body, return the cached response
-            if (JSON.stringify(req.body) === keyEntry.body) {
-                return res.status(200).json(keyEntry.response);
-            }
-            else {
-                return res.status(409).json({
-                    error: {
-                        code: 'idempotency_key_reuse',
-                        message: 'Idempotency key already used with different request body'
-                    }
-                });
-            }
-        }
-        // Get restaurant
-        const restaurant = getRestaurantById(restaurant_id);
-        if (!restaurant) {
-            return res.status(404).json({
-                error: {
-                    code: 'not_found',
-                    message: 'Restaurant not found'
-                }
-            });
-        }
-        // Get table
-        const table = restaurant.tables.find(t => t.id === table_id);
-        if (!table) {
-            return res.status(404).json({
-                error: {
-                    code: 'not_found',
-                    message: 'Table not found'
-                }
-            });
-        }
-        // Validate party size vs table capacity
-        if (party_size > table.capacity) {
-            return res.status(422).json({
-                error: {
-                    code: 'party_exceeds_capacity',
-                    message: 'Party size exceeds table capacity'
-                }
-            });
-        }
-        // Parse start time
-        const startsAt = DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
-        if (!startsAt.isValid) {
-            return res.status(422).json({
-                error: {
-                    code: 'invalid_local_time',
-                    message: 'Invalid local time'
-                }
-            });
-        }
-        // Check if start time is on slot grid
-        const startMinutes = startsAt.hour * 60 + startsAt.minute;
-        if (startMinutes % restaurant.slot_minutes !== 0) {
-            return res.status(422).json({
-                error: {
-                    code: 'not_on_slot_grid',
-                    message: 'Start time is not on slot grid'
-                }
-            });
-        }
-        // Check if reservation would be within opening hours
-        const weekday = startsAt.toISOWeekday() === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][startsAt.toISOWeekday() - 1];
-        const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
-        if (!openingHour) {
-            return res.status(422).json({
-                error: {
-                    code: 'outside_opening_hours',
-                    message: 'Reservation outside opening hours'
-                }
-            });
-        }
-        const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
-        const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
-        const opensAt = DateTime.fromObject({
-            year: startsAt.year,
-            month: startsAt.month,
-            day: startsAt.day,
-            hour: openHour,
-            minute: openMinute,
-            zone: restaurant.timezone
-        });
-        const closesAt = DateTime.fromObject({
-            year: startsAt.year,
-            month: startsAt.month,
-            day: startsAt.day,
-            hour: closeHour,
-            minute: closeMinute,
-            zone: restaurant.timezone
-        });
-        if (startsAt < opensAt || startsAt >= closesAt) {
-            return res.status(422).json({
-                error: {
-                    code: 'outside_opening_hours',
-                    message: 'Reservation outside opening hours'
-                }
-            });
-        }
-        // Check if reservation would end after closing
-        const endsAt = startsAt.plus({ minutes: restaurant.reservation_duration_minutes });
-        if (endsAt > closesAt) {
-            return res.status(422).json({
-                error: {
-                    code: 'outside_opening_hours',
-                    message: 'Reservation would end after closing'
-                }
-            });
-        }
-        // Check for overlapping reservations
-        const reservationConflict = Object.values(state.reservations).find(res => {
-            if (res.table_id !== table_id || res.status !== 'confirmed')
-                return false;
-            const resStart = DateTime.fromISO(res.starts_at);
-            const resEnd = DateTime.fromISO(res.ends_at);
-            // Check for overlap
-            return !(endsAt <= resStart || startsAt >= resEnd);
-        });
-        if (reservationConflict) {
-            return res.status(409).json({
-                error: {
-                    code: 'table_unavailable',
-                    message: 'Table is not available at the requested time'
-                }
-            });
-        }
-        // Create reservation
-        const reservationId = `res_${uuidv4().substring(0, 12)}`;
-        const reference = generateReference();
-        const reservation = {
-            id: reservationId,
-            reference,
-            user_id: userId,
-            restaurant_id,
-            table_id,
-            starts_at_local,
-            starts_at: startsAt.toISO({ suppressMilliseconds: true }),
-            ends_at: endsAt.toISO({ suppressMilliseconds: true }),
-            party_size,
-            status: 'confirmed',
-            created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
-        };
-        // Store reservation
-        state.reservations[reservationId] = reservation;
-        // Cache idempotency key
-        state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
-            userId,
-            body: JSON.stringify(req.body),
-            response: reservation
-        };
-        res.status(201).json(reservation);
-    } catch (error) {
-        console.error('Reservation creation error:', error);
-        return res.status(500).json({
+    const { restaurant_id, table_id, starts_at_local, party_size } = req.body;
+    const userId = req.user.id;
+    // Validate required fields
+    if (!restaurant_id || !table_id || !starts_at_local || party_size === undefined) {
+        return res.status(422).json({
             error: {
-                code: 'internal_error',
-                message: 'Internal server error'
+                code: 'validation_failed',
+                message: 'Missing required fields'
             }
         });
     }
+    // Validate time format
+    if (!validateTimeFormat(starts_at_local)) {
+        return res.status(422).json({
+            error: {
+                code: 'validation_failed',
+                message: 'Invalid time format'
+            }
+        });
+    }
+    // Validate party size
+    if (typeof party_size !== 'number' || party_size < 1 || !Number.isInteger(party_size)) {
+        return res.status(422).json({
+            error: {
+                code: 'validation_failed',
+                message: 'Invalid party size'
+            }
+        });
+    }
+    // Validate idempotency key
+    const idempotencyKey = req.headers['idempotency-key'];
+    if (!idempotencyKey) {
+        return res.status(400).json({
+            error: {
+                code: 'missing_idempotency_key',
+                message: 'Idempotency key is required'
+            }
+        });
+    }
+    // Check if key already used
+    const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
+    if (keyEntry) {
+        // If same body, return the cached response
+        if (JSON.stringify(req.body) === keyEntry.body) {
+            return res.status(200).json(keyEntry.response);
+        }
+        else {
+            return res.status(409).json({
+                error: {
+                    code: 'idempotency_key_reuse',
+                    message: 'Idempotency key already used with different request body'
+                }
+            });
+        }
+    }
+    // Get restaurant
+    const restaurant = getRestaurantById(restaurant_id);
+    if (!restaurant) {
+        return res.status(404).json({
+            error: {
+                code: 'not_found',
+                message: 'Restaurant not found'
+            }
+        });
+    }
+    // Get table
+    const table = restaurant.tables.find(t => t.id === table_id);
+    if (!table) {
+        return res.status(404).json({
+            error: {
+                code: 'not_found',
+                message: 'Table not found'
+            }
+        });
+    }
+    // Validate party size vs table capacity
+    if (party_size > table.capacity) {
+        return res.status(422).json({
+            error: {
+                code: 'party_exceeds_capacity',
+                message: 'Party size exceeds table capacity'
+            }
+        });
+    }
+    // Parse start time
+    const startsAt = luxon_1.DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
+    if (!startsAt.isValid) {
+        return res.status(422).json({
+            error: {
+                code: 'invalid_local_time',
+                message: 'Invalid local time'
+            }
+        });
+    }
+    // Check if start time is on slot grid
+    const startMinutes = startsAt.hour * 60 + startsAt.minute;
+    if (startMinutes % restaurant.slot_minutes !== 0) {
+        return res.status(422).json({
+            error: {
+                code: 'not_on_slot_grid',
+                message: 'Start time is not on slot grid'
+            }
+        });
+    }
+    // Check if reservation would be within opening hours
+    const weekday = startsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][startsAt.weekday - 1];
+    const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
+    if (!openingHour) {
+        return res.status(422).json({
+            error: {
+                code: 'outside_opening_hours',
+                message: 'Reservation outside opening hours'
+            }
+        });
+    }
+    const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
+    const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
+    const opensAt = luxon_1.DateTime.fromObject({
+        year: startsAt.year,
+        month: startsAt.month,
+        day: startsAt.day,
+        hour: openHour,
+        minute: openMinute
+    }, { zone: restaurant.timezone });
+    const closesAt = luxon_1.DateTime.fromObject({
+        year: startsAt.year,
+        month: startsAt.month,
+        day: startsAt.day,
+        hour: closeHour,
+        minute: closeMinute
+    }, { zone: restaurant.timezone });
+    if (startsAt < opensAt || startsAt >= closesAt) {
+        return res.status(422).json({
+            error: {
+                code: 'outside_opening_hours',
+                message: 'Reservation outside opening hours'
+            }
+        });
+    }
+    // Check if reservation would end after closing
+    const endsAt = startsAt.plus({ minutes: restaurant.reservation_duration_minutes });
+    if (endsAt > closesAt) {
+        return res.status(422).json({
+            error: {
+                code: 'outside_opening_hours',
+                message: 'Reservation would end after closing'
+            }
+        });
+    }
+    // Check for overlapping reservations
+    const reservationConflict = Object.values(state.reservations).find(res => {
+        if (res.table_id !== table_id || res.status !== 'confirmed')
+            return false;
+        const resStart = luxon_1.DateTime.fromISO(res.starts_at);
+        const resEnd = luxon_1.DateTime.fromISO(res.ends_at);
+        // Check for overlap
+        return !(endsAt <= resStart || startsAt >= resEnd);
+    });
+    if (reservationConflict) {
+        return res.status(409).json({
+            error: {
+                code: 'table_unavailable',
+                message: 'Table is not available at the requested time'
+            }
+        });
+    }
+    // Create reservation
+    const reservationId = `res_${(0, uuid_1.v4)().substring(0, 12)}`;
+    const reference = generateReference();
+    const reservation = {
+        id: reservationId,
+        reference,
+        user_id: userId,
+        restaurant_id,
+        table_id,
+        starts_at_local,
+        starts_at: startsAt.toISO({ suppressMilliseconds: true }),
+        ends_at: endsAt.toISO({ suppressMilliseconds: true }),
+        party_size,
+        status: 'confirmed',
+        created_at: luxon_1.DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
+    };
+    // Store reservation
+    state.reservations[reservationId] = reservation;
+    // Cache idempotency key
+    state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
+        userId,
+        body: JSON.stringify(req.body),
+        response: reservation
+    };
+    res.status(201).json(reservation);
 });
 app.get('/reservations', authenticate, (req, res) => {
     const userId = req.user.id;
@@ -852,7 +619,7 @@ app.get('/reservations', authenticate, (req, res) => {
 app.get('/reservations/:reference', authenticate, (req, res) => {
     const reference = req.params.reference;
     const userId = req.user.id;
-    const reservation = getReservationByReference(reference);
+    const reservation = getReservationByReference(reference || '');
     if (!reservation) {
         return res.status(404).json({
             error: {
@@ -873,79 +640,60 @@ app.get('/reservations/:reference', authenticate, (req, res) => {
     res.status(200).json(reservation);
 });
 app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
-    try {
-        const reference = req.params.reference;
-        const userId = req.user.id;
-        const reservation = getReservationByReference(reference);
-        if (!reservation) {
-            return res.status(404).json({
-                error: {
-                    code: 'not_found',
-                    message: 'Reservation not found'
-                }
-            });
-        }
-        // Check ownership
-        if (reservation.user_id !== userId) {
-            return res.status(404).json({
-                error: {
-                    code: 'not_found',
-                    message: 'Reservation not found'
-                }
-            });
-        }
-        // Check if already cancelled
-        if (reservation.status === 'cancelled') {
-            return res.status(200).json(reservation);
-        }
-        // Check cancellation cutoff
-        const restaurant = getRestaurantById(reservation.restaurant_id);
-        if (!restaurant) {
-            return res.status(404).json({
-                error: {
-                    code: 'not_found',
-                    message: 'Restaurant not found'
-                }
-            });
-        }
-        const startsAt = DateTime.fromISO(reservation.starts_at);
-        const now = DateTime.now();
-        const timeUntilStart = startsAt.diff(now, 'minutes').minutes;
-        if (timeUntilStart <= restaurant.cancellation_cutoff_minutes) {
-            // Check if the reservation has already started
-            if (now > startsAt) {
-                return res.status(409).json({
-                    error: {
-                        code: 'cutoff_passed',
-                        message: 'Reservation has already started'
-                    }
-                });
-            }
-            return res.status(409).json({
-                error: {
-                    code: 'cutoff_passed',
-                    message: 'Cancellation deadline passed'
-                }
-            });
-        }
-        // Cancel reservation
-        reservation.status = 'cancelled';
-        res.status(200).json(reservation);
-    } catch (error) {
-        console.error('Cancellation error:', error);
-        return res.status(500).json({
+    const reference = req.params.reference;
+    const userId = req.user.id;
+    const reservation = getReservationByReference(reference || '');
+    if (!reservation) {
+        return res.status(404).json({
             error: {
-                code: 'internal_error',
-                message: 'Internal server error'
+                code: 'not_found',
+                message: 'Reservation not found'
             }
         });
     }
+    // Check ownership
+    if (reservation.user_id !== userId) {
+        return res.status(404).json({
+            error: {
+                code: 'not_found',
+                message: 'Reservation not found'
+            }
+        });
+    }
+    // Check if already cancelled
+    if (reservation.status === 'cancelled') {
+        return res.status(200).json(reservation);
+    }
+    // Check cancellation cutoff
+    const restaurant = getRestaurantById(reservation.restaurant_id);
+    if (!restaurant) {
+        return res.status(404).json({
+            error: {
+                code: 'not_found',
+                message: 'Restaurant not found'
+            }
+        });
+    }
+    const startsAt = luxon_1.DateTime.fromISO(reservation.starts_at);
+    const now = luxon_1.DateTime.now();
+    const timeUntilStart = startsAt.diff(now, 'minutes').minutes;
+    if (timeUntilStart <= restaurant.cancellation_cutoff_minutes) {
+        return res.status(409).json({
+            error: {
+                code: 'cutoff_passed',
+                message: 'Cancellation deadline passed'
+            }
+        });
+    }
+    // Cancel reservation
+    reservation.status = 'cancelled';
+    res.status(200).json(reservation);
 });
 app.patch('/reservations/:reference', authenticate, (req, res) => {
     const reference = req.params.reference;
     const userId = req.user.id;
     const { table_id, starts_at_local, party_size } = req.body;
-    const reservation = getReservationByReference(reference);
+    const reservation = getReservationByReference(reference || '');
     if (!reservation) {
         return res.status(404).json({
             error: {
@@ -1020,7 +768,7 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
         return res.status(200).json(reservation);
     }
     // Validate changes
-    const newStartsAt = starts_at_local ? DateTime.fromISO(starts_at_local, { zone: restaurant.timezone }) : DateTime.fromISO(reservation.starts_at);
+    const newStartsAt = starts_at_local ? luxon_1.DateTime.fromISO(starts_at_local, { zone: restaurant.timezone }) : luxon_1.DateTime.fromISO(reservation.starts_at);
     const newPartySize = party_size !== undefined ? party_size : reservation.party_size;
     const newTableId = table_id !== undefined ? table_id : reservation.table_id;
     // Validate party size vs table capacity
@@ -1047,7 +795,7 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
     }
     // Check if reservation would be within opening hours
     if (starts_at_local) {
-        const weekday = newStartsAt.toISOWeekday() === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][newStartsAt.toISOWeekday() - 1];
+        const weekday = newStartsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][newStartsAt.weekday - 1];
         const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
         if (!openingHour) {
             return res.status(422).json({
@@ -1059,22 +807,20 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
         }
         const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
         const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
-        const opensAt = DateTime.fromObject({
+        const opensAt = luxon_1.DateTime.fromObject({
             year: newStartsAt.year,
             month: newStartsAt.month,
             day: newStartsAt.day,
             hour: openHour,
-            minute: openMinute,
-            zone: restaurant.timezone
-        });
-        const closesAt = DateTime.fromObject({
+            minute: openMinute
+        }, { zone: restaurant.timezone });
+        const closesAt = luxon_1.DateTime.fromObject({
             year: newStartsAt.year,
             month: newStartsAt.month,
             day: newStartsAt.day,
             hour: closeHour,
-            minute: closeMinute,
-            zone: restaurant.timezone
-        });
+            minute: closeMinute
+        }, { zone: restaurant.timezone });
         if (newStartsAt < opensAt || newStartsAt >= closesAt) {
             return res.status(422).json({
                 error: {
@@ -1095,13 +841,22 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
         }
     }
     // Check for overlapping reservations
+    let updatedEndsAt;
     const reservationConflict = Object.values(state.reservations).find(res => {
         if (res.id === reservation.id || res.table_id !== newTableId || res.status !== 'confirmed')
             return false;
-        const resStart = DateTime.fromISO(res.starts_at);
-        const resEnd = DateTime.fromISO(res.ends_at);
+        const resStart = luxon_1.DateTime.fromISO(res.starts_at);
+        const resEnd = luxon_1.DateTime.fromISO(res.ends_at);
+        // Calculate updated ends time for overlap check
+        if (starts_at_local) {
+            const updatedStartsAt = luxon_1.DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
+            updatedEndsAt = updatedStartsAt.plus({ minutes: restaurant.reservation_duration_minutes });
+        }
+        else {
+            updatedEndsAt = luxon_1.DateTime.fromISO(reservation.ends_at);
+        }
         // Check for overlap
-        return !(endsAt <= resStart || newStartsAt >= resEnd);
+        return !(updatedEndsAt <= resStart || newStartsAt >= resEnd);
     });
     if (reservationConflict) {
         return res.status(409).json({
@@ -1117,10 +872,10 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
     updatedReservation.table_id = table_id !== undefined ? table_id : reservation.table_id;
     // Update times based on new start time
     if (starts_at_local) {
-        const updatedStartsAt = DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
+        const updatedStartsAt = luxon_1.DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
         const updatedEndsAt = updatedStartsAt.plus({ minutes: restaurant.reservation_duration_minutes });
-        updatedReservation.starts_at = updatedStartsAt.toISO({ suppressMilliseconds: true });
-        updatedReservation.ends_at = updatedEndsAt.toISO({ suppressMilliseconds: true });
+        updatedReservation.starts_at = updatedStartsAt.toISO({ suppressMilliseconds: true }) || '';
+        updatedReservation.ends_at = updatedEndsAt.toISO({ suppressMilliseconds: true }) || '';
     }
     state.reservations[reservation.id] = updatedReservation;
     res.status(200).json(updatedReservation);

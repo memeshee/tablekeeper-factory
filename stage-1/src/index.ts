@@ -67,12 +67,14 @@ let state: {
   reservations: Record<string, Reservation>;
   idempotencyKeys: Record<string, { userId: string; body: string; response: any }>;
   exportState: any;
+  tokens: Record<string, string>; // token -> user id mapping
 } = {
   users: {},
   restaurants: {},
   reservations: {},
   idempotencyKeys: {},
-  exportState: null
+  exportState: null,
+  tokens: {}
 };
 
 const app = express();
@@ -127,22 +129,19 @@ const authenticate = (req: Request, res: Response, next: NextFunction) => {
       }
     });
   }
-
-  // In a real implementation, we'd validate the token
-  // For now, we'll simulate authentication
   const token = authHeader.substring(7);
-  // For demo purposes, we'll just check if it's a valid UUID-like string
-  if (!token.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+  // Look up token in our server-side token store
+  const userId = state.tokens[token];
+  if (!userId) {
     return res.status(401).json({
       error: {
         code: 'unauthenticated',
-        message: 'Invalid token'
+        message: 'Invalid or unknown token'
       }
     });
   }
-
-  // Simulate authenticated user (in real app, we'd decode the token)
-  (req as any).user = { id: 'u_test_user' };
+  // Set the authenticated user
+  (req as any).user = { id: userId };
   next();
 };
 
@@ -173,12 +172,47 @@ app.post('/_test/reset', (req, res) => {
     restaurants: {},
     reservations: {},
     idempotencyKeys: {},
-    exportState: null
+    exportState: null,
+    tokens: {} // Reset tokens as well
   };
 
   // Load fixture data
   fixture.users.forEach(user => {
-    state.users[user.id] = user;
+    // Hash the password if it's not already hashed
+    if (user.password && !user.password_hash) {
+      // Hash password like in signup endpoint
+      const saltRounds = 10;
+      bcrypt.hash(user.password, saltRounds, (err, hash) => {
+        if (err) {
+          console.error('Failed to hash password during reset:', err);
+          return res.status(500).json({
+            error: {
+              code: 'internal_error',
+              message: 'Failed to hash password'
+            }
+          });
+        }
+        const newUser = {
+          ...user,
+          password_hash: hash,
+          password: undefined // Remove plaintext password
+        };
+        state.users[user.id] = newUser;
+        // Also generate and store a token for this user (for fixture users)
+        if (user.email) {
+          const token = `token_${uuidv4().substring(0, 16)}`;
+          state.tokens[token] = user.id;
+        }
+      });
+    } else {
+      // User already has password_hash or no password
+      state.users[user.id] = user;
+      // Also generate and store a token for this user (for fixture users)
+      if (user.email) {
+        const token = `token_${uuidv4().substring(0, 16)}`;
+        state.tokens[token] = user.id;
+      }
+    }
   });
 
   fixture.restaurants.forEach(restaurant => {
@@ -284,8 +318,10 @@ app.post('/auth/signup', (req, res) => {
 
     state.users[userId] = newUser;
 
-    // Generate a mock token for demonstration
+    // Generate a proper token and store it
     const token = `token_${uuidv4().substring(0, 16)}`;
+    // Store the token mapping
+    state.tokens[token] = userId;
 
     res.status(201).json({
       user_id: userId,
@@ -320,8 +356,10 @@ app.post('/auth/login', (req, res) => {
       });
     }
 
-    // Generate a mock token for demonstration
+    // Generate a proper token and store it
     const token = `token_${uuidv4().substring(0, 16)}`;
+    // Store the token mapping
+    state.tokens[token] = user.id;
 
     res.status(200).json({
       user_id: user.id,
