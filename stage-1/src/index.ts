@@ -1041,7 +1041,7 @@ updatedReservation.ends_at = updatedEndsAt.toISO({ suppressMilliseconds: true })
 app.use(errorHandler);
 
 // Start server
-const PORT = process.env.PORT || 8080;
+const PORT = parseInt(process.env.PORT || '8080', 10);
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Tablekeeper service running on port ${PORT}`);
 });
