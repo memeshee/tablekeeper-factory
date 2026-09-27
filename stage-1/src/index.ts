@@ -1322,10 +1322,21 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   updatedReservation.table_id = table_id !== undefined ? table_id : reservation.table_id;
   
   // Check cutoff for changes
-  if (restaurant && starts_at_local) {
-    const startsAt = DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
+  // Always check cutoff regardless of what's changed (rule applies to current start time)
+  if (restaurant) {
+    // Determine the start time to check against cutoff
+    let startsAtToCheck: DateTime<true> | DateTime<false>;
+    
+    if (starts_at_local) {
+      // If new start time is provided, use it
+      startsAtToCheck = DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
+    } else {
+      // If no new start time, use the existing start time
+      startsAtToCheck = DateTime.fromISO(reservation.starts_at);
+    }
+    
     const now = DateTime.now();
-    const timeUntilStart = startsAt.diff(now, 'minutes').minutes;
+    const timeUntilStart = startsAtToCheck.diff(now, 'minutes').minutes;
     
     // Check if change is within cutoff period
     if (timeUntilStart <= restaurant.cancellation_cutoff_minutes) {
