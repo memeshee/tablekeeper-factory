@@ -67,12 +67,14 @@ let state: {
   reservations: Record<string, Reservation>;
   idempotencyKeys: Record<string, { userId: string; body: string; response: any }>;
   exportState: any;
+  tokens: Record<string, string>; // token -> user_id mapping
 } = {
   users: {},
   restaurants: {},
   reservations: {},
   idempotencyKeys: {},
-  exportState: null
+  exportState: null,
+  tokens: {}
 };
 
 const app = express();
@@ -128,11 +130,11 @@ const authenticate = (req: Request, res: Response, next: NextFunction) => {
     });
   }
 
-  // In a real implementation, we'd validate the token
-  // For now, we'll simulate authentication
   const token = authHeader.substring(7);
-  // For demo purposes, we'll just check if it's a valid UUID-like string
-  if (!token.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+  
+  // Check if token exists in our token map
+  const userId = state.tokens[token];
+  if (!userId) {
     return res.status(401).json({
       error: {
         code: 'unauthenticated',
@@ -141,8 +143,8 @@ const authenticate = (req: Request, res: Response, next: NextFunction) => {
     });
   }
 
-  // Simulate authenticated user (in real app, we'd decode the token)
-  (req as any).user = { id: 'u_test_user' };
+  // Set user in request
+  (req as any).user = { id: userId };
   next();
 };
 
@@ -173,7 +175,8 @@ app.post('/_test/reset', (req, res) => {
     restaurants: {},
     reservations: {},
     idempotencyKeys: {},
-    exportState: null
+    exportState: null,
+    tokens: {} // Clear tokens so fixture users can log in fresh
   };
 
   // Load fixture data
@@ -297,8 +300,9 @@ app.post('/auth/signup', (req, res) => {
 
     state.users[userId] = newUser;
 
-    // Generate a mock token for demonstration
+    // Generate a real token for the user
     const token = `token_${uuidv4().substring(0, 16)}`;
+    state.tokens[token] = userId;
 
     res.status(201).json({
       user_id: userId,
@@ -333,8 +337,9 @@ app.post('/auth/login', (req, res) => {
       });
     }
 
-    // Generate a mock token for demonstration
+    // Generate a real token for the user
     const token = `token_${uuidv4().substring(0, 16)}`;
+    state.tokens[token] = user.id;
 
     res.status(200).json({
       user_id: user.id,
@@ -468,7 +473,7 @@ const generateAvailableSlots = (restaurant: Restaurant, dateStr: string, partySi
     const availableTables = getAvailableTables(restaurant, slotStart, slotEndDateTime, partySize);
 
     slots.push({
-      starts_at_local: slotStart.toISO({ suppressMilliseconds: true, includeOffset: false }),
+      starts_at_local: slotStart.toFormat('yyyy-MM-dd\'T\'HH:mm'), // YYYY-MM-DDTHH:MM format
       starts_at: slotStart.toISO({ suppressMilliseconds: true }),
       available_table_ids: availableTables.map(t => t.id)
     });
