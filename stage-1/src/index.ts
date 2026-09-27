@@ -7,7 +7,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 import { DateTime, IANAZone } from 'luxon';
-import fs from 'fs';
+import * as fs from 'fs';
 
 // Types and interfaces
 interface User {
