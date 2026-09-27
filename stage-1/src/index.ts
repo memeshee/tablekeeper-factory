@@ -169,6 +169,46 @@ app.get('/health', (req, res) => {
 app.post('/_test/reset', (req, res) => {
   const fixture: Fixture = req.body;
   
+  // Validate fixture structure
+  if (!fixture || typeof fixture !== 'object') {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid fixture data'
+      }
+    });
+  }
+  
+  // Validate users array
+  if (!Array.isArray(fixture.users)) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid users array in fixture'
+      }
+    });
+  }
+  
+  // Validate restaurants array
+  if (!Array.isArray(fixture.restaurants)) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid restaurants array in fixture'
+      }
+    });
+  }
+  
+  // Validate reservations array
+  if (!Array.isArray(fixture.reservations)) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid reservations array in fixture'
+      }
+    });
+  }
+  
   // Clear current state
   state = {
     users: {},
@@ -181,6 +221,11 @@ app.post('/_test/reset', (req, res) => {
 
   // Load fixture data
   fixture.users.forEach(user => {
+    // Validate user structure
+    if (!user || typeof user !== 'object' || !user.id || !user.email) {
+      return; // Skip invalid users
+    }
+    
     // Hash password if it exists (for seeded users)
     if ((user as any).password) {
       const hashedPassword = bcrypt.hashSync((user as any).password, 10);
@@ -198,10 +243,18 @@ app.post('/_test/reset', (req, res) => {
   });
 
   fixture.restaurants.forEach(restaurant => {
+    // Validate restaurant structure
+    if (!restaurant || typeof restaurant !== 'object' || !restaurant.id) {
+      return; // Skip invalid restaurants
+    }
     state.restaurants[restaurant.id] = restaurant;
   });
 
   fixture.reservations.forEach(reservation => {
+    // Validate reservation structure
+    if (!reservation || typeof reservation !== 'object' || !reservation.id) {
+      return; // Skip invalid reservations
+    }
     state.reservations[reservation.id] = reservation;
   });
 
@@ -397,13 +450,24 @@ app.get('/availability', (req, res) => {
     });
   }
 
-  // Validate party size
-  const partySize = parseInt(party_size as string, 10);
-  if (isNaN(partySize) || partySize < 1) {
+  // Validate date format (YYYY-MM-DD)
+  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRegex.test(date as string)) {
     return res.status(422).json({
       error: {
         code: 'validation_failed',
-        message: 'Invalid party size'
+        message: 'Invalid date format. Expected YYYY-MM-DD'
+      }
+    });
+  }
+
+  // Validate party size
+  const partySize = parseInt(party_size as string, 10);
+  if (isNaN(partySize) || partySize < 1 || partySize > 20) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid party size. Must be between 1 and 20'
       }
     });
   }
