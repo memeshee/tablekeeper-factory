@@ -357,16 +357,42 @@ app.post('/_test/reset', (req, res) => {
     state.restaurants[restaurant.id] = restaurant;
   });
 
-  fixture.reservations.forEach(reservation => {
+fixture.reservations.forEach(reservation => {
     // Apply the same normalization that happens during creation
-    const normalizedReservation = {
-      ...reservation,
-      // Ensure reservation has required fields
-      status: reservation.status || 'confirmed',
-      // Convert starts_at and ends_at to ISO format if needed
-      starts_at: reservation.starts_at || '',
-      ends_at: reservation.ends_at || ''
-    };
+    // For seeded reservations, we need to compute starts_at/ends_at from starts_at_local
+    let normalizedReservation = { ...reservation };
+    
+    // Ensure reservation has required fields with defaults
+    normalizedReservation.status = reservation.status || 'confirmed';
+    
+    // If starts_at_local is provided, compute the absolute instants
+    if (reservation.starts_at_local) {
+      // Find the restaurant to get timezone info
+      const restaurant = getRestaurantById(reservation.restaurant_id);
+      if (restaurant) {
+        // Parse the local time and convert to absolute instants
+        const startsAt = DateTime.fromISO(reservation.starts_at_local, { zone: restaurant.timezone });
+        if (startsAt.isValid) {
+          // Compute ends_at based on reservation duration
+          const endsAt = startsAt.plus({ minutes: restaurant.reservation_duration_minutes });
+          
+          normalizedReservation.starts_at = startsAt.toISO({ suppressMilliseconds: true }) || '';
+          normalizedReservation.ends_at = endsAt.toISO({ suppressMilliseconds: true }) || '';
+        } else {
+          // If invalid time, set empty strings
+          normalizedReservation.starts_at = '';
+          normalizedReservation.ends_at = '';
+        }
+      } else {
+        // If no restaurant found, set empty strings
+        normalizedReservation.starts_at = '';
+        normalizedReservation.ends_at = '';
+      }
+    } else {
+      // If no starts_at_local, set empty strings
+      normalizedReservation.starts_at = '';
+      normalizedReservation.ends_at = '';
+    }
     
     state.reservations[normalizedReservation.id] = normalizedReservation;
   });
