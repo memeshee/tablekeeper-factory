@@ -209,7 +209,106 @@ app.post('/_test/reset', (req, res) => {
     });
   }
   
-  // Clear current state
+  // Validate all fixture IDs and references BEFORE clearing state
+  // Validate users
+  for (const user of fixture.users) {
+    if (!user || typeof user !== 'object' || !user.id) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid user in fixture'
+        }
+      });
+    }
+    // Validate user ID length (1-64 characters)
+    if (typeof user.id !== 'string' || user.id.length < 1 || user.id.length > 64) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid user ID length in fixture'
+        }
+      });
+    }
+  }
+  
+  // Validate restaurants
+  for (const restaurant of fixture.restaurants) {
+    if (!restaurant || typeof restaurant !== 'object' || !restaurant.id) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid restaurant in fixture'
+        }
+      });
+    }
+    // Validate restaurant ID length (1-64 characters)
+    if (typeof restaurant.id !== 'string' || restaurant.id.length < 1 || restaurant.id.length > 64) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid restaurant ID length in fixture'
+        }
+      });
+    }
+  }
+  
+  // Validate tables (if they exist)
+  for (const restaurant of fixture.restaurants) {
+    if (restaurant && Array.isArray(restaurant.tables)) {
+      for (const table of restaurant.tables) {
+        if (!table || typeof table !== 'object' || !table.id) {
+          return res.status(422).json({
+            error: {
+              code: 'validation_failed',
+              message: 'Invalid table in fixture'
+            }
+          });
+        }
+        // Validate table ID length (1-64 characters)
+        if (typeof table.id !== 'string' || table.id.length < 1 || table.id.length > 64) {
+          return res.status(422).json({
+            error: {
+              code: 'validation_failed',
+              message: 'Invalid table ID length in fixture'
+            }
+          });
+        }
+      }
+    }
+  }
+  
+  // Validate reservations
+  for (const reservation of fixture.reservations) {
+    if (!reservation || typeof reservation !== 'object' || !reservation.id) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid reservation in fixture'
+        }
+      });
+    }
+    // Validate reservation ID length (1-64 characters)
+    if (typeof reservation.id !== 'string' || reservation.id.length < 1 || reservation.id.length > 64) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid reservation ID length in fixture'
+        }
+      });
+    }
+    // Validate reservation reference format
+    if (typeof reservation.reference !== 'string' || 
+        !/^[A-Z0-9]{6,12}$/.test(reservation.reference)) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid reservation reference format in fixture'
+        }
+      });
+    }
+  }
+  
+  // Clear current state only after validation passes
   state = {
     users: {},
     restaurants: {},
@@ -221,11 +320,6 @@ app.post('/_test/reset', (req, res) => {
 
   // Load fixture data
   fixture.users.forEach(user => {
-    // Validate user structure
-    if (!user || typeof user !== 'object' || !user.id || !user.email) {
-      return; // Skip invalid users
-    }
-    
     // Hash password if it exists (for seeded users)
     if ((user as any).password) {
       const hashedPassword = bcrypt.hashSync((user as any).password, 10);
@@ -243,18 +337,10 @@ app.post('/_test/reset', (req, res) => {
   });
 
   fixture.restaurants.forEach(restaurant => {
-    // Validate restaurant structure
-    if (!restaurant || typeof restaurant !== 'object' || !restaurant.id) {
-      return; // Skip invalid restaurants
-    }
     state.restaurants[restaurant.id] = restaurant;
   });
 
   fixture.reservations.forEach(reservation => {
-    // Validate reservation structure
-    if (!reservation || typeof reservation !== 'object' || !reservation.id) {
-      return; // Skip invalid reservations
-    }
     state.reservations[reservation.id] = reservation;
   });
 
@@ -461,8 +547,49 @@ app.get('/availability', (req, res) => {
     });
   }
 
+  // Validate actual calendar date components
+  const [yearStr, monthStr, dayStr] = (date as string).split('-');
+  const year = parseInt(yearStr, 10);
+  const month = parseInt(monthStr, 10);
+  const day = parseInt(dayStr, 10);
+  
+  // Check if month and day are in valid ranges
+  if (month < 1 || month > 12 || day < 1 || day > 31) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid date components'
+      }
+    });
+  }
+  
+  // Create a date object to check if it's a valid calendar date
+  const testDate = new Date(year, month - 1, day);
+  if (testDate.getFullYear() !== year || 
+      testDate.getMonth() !== month - 1 || 
+      testDate.getDate() !== day) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid date'
+      }
+    });
+  }
+
   // Validate party size
-  const partySize = parseInt(party_size as string, 10);
+  const partySizeStr = party_size as string;
+  
+  // Check raw string format first - must be digits only
+  if (!/^[0-9]+$/.test(partySizeStr)) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid party size. Must be a positive integer'
+      }
+    });
+  }
+  
+  const partySize = parseInt(partySizeStr, 10);
   if (isNaN(partySize) || partySize < 1 || partySize > 20) {
     return res.status(422).json({
       error: {
