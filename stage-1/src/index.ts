@@ -916,16 +916,27 @@ app.post('/reservations', authenticate, (req, res) => {
     });
   }
 
-  // Parse start time
-  const startsAt = DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
-  if (!startsAt.isValid) {
-    return res.status(422).json({
-      error: {
-        code: 'invalid_local_time',
-        message: 'Invalid local time'
+// Parse start time
+      const startsAt = DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
+      if (!startsAt.isValid) {
+        return res.status(422).json({
+          error: {
+            code: 'invalid_local_time',
+            message: 'Invalid local time'
+          }
+        });
       }
-    });
-  }
+      
+      // Check for skipped hour (Luxon shifts 02:30->03:30, so check wall time round-trip)
+      const formattedTime = startsAt.toFormat('HH:mm');
+      if (formattedTime !== starts_at_local.substring(0, 5)) {
+        return res.status(422).json({
+          error: {
+            code: 'invalid_local_time',
+            message: 'Invalid local time - skipped hour detected'
+          }
+        });
+      }
 
   // Check if start time is on slot grid
   const startMinutes = startsAt.hour * 60 + startsAt.minute;
@@ -1223,6 +1234,16 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   let changesMade = false;
 
   if (table_id !== undefined) {
+    // Validate table exists in the restaurant
+    const table = restaurant.tables.find(t => t.id === table_id);
+    if (!table) {
+      return res.status(404).json({
+        error: {
+          code: 'not_found',
+          message: 'Table not found'
+        }
+      });
+    }
     updatedReservation.table_id = table_id;
     changesMade = true;
   }
