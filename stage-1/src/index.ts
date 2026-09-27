@@ -709,7 +709,7 @@ const closesAt = DateTime.fromObject({
   const reference = generateReference();
   
   const reservation: Reservation = {
-    id: reservationId,
+    reservation_id: reservationId, // Changed from 'id' to 'reservation_id' to match spec
     reference,
     user_id: userId,
     restaurant_id,
@@ -732,7 +732,19 @@ const closesAt = DateTime.fromObject({
     response: reservation
   };
 
-  res.status(201).json(reservation);
+  res.status(201).json({
+    reservation_id: reservationId,
+    reference,
+    user_id: userId,
+    restaurant_id,
+    table_id,
+    starts_at_local,
+    starts_at: startsAt.toISO({ suppressMilliseconds: true }),
+    ends_at: endsAt.toISO({ suppressMilliseconds: true }),
+    party_size,
+    status: 'confirmed',
+    created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
+  });
 });
 
 app.get('/reservations', authenticate, (req, res) => {
@@ -744,7 +756,22 @@ app.get('/reservations', authenticate, (req, res) => {
     return new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime();
   });
 
-  res.status(200).json({ reservations: userReservations });
+  // Convert to the correct response format (using reservation_id instead of id)
+  const formattedReservations = userReservations.map(r => ({
+    reservation_id: r.id, // Map internal id to reservation_id
+    reference: r.reference,
+    user_id: r.user_id,
+    restaurant_id: r.restaurant_id,
+    table_id: r.table_id,
+    starts_at_local: r.starts_at_local,
+    starts_at: r.starts_at,
+    ends_at: r.ends_at,
+    party_size: r.party_size,
+    status: r.status,
+    created_at: r.created_at
+  }));
+
+  res.status(200).json({ reservations: formattedReservations });
 });
 
 app.get('/reservations/:reference', authenticate, (req, res) => {
@@ -772,7 +799,20 @@ app.get('/reservations/:reference', authenticate, (req, res) => {
     });
   }
   
-  res.status(200).json(reservation);
+  // Convert to correct response format
+  res.status(200).json({
+    reservation_id: reservation.id,
+    reference: reservation.reference,
+    user_id: reservation.user_id,
+    restaurant_id: reservation.restaurant_id,
+    table_id: reservation.table_id,
+    starts_at_local: reservation.starts_at_local,
+    starts_at: reservation.starts_at,
+    ends_at: reservation.ends_at,
+    party_size: reservation.party_size,
+    status: reservation.status,
+    created_at: reservation.created_at
+  });
 });
 
 app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
