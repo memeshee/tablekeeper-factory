@@ -941,14 +941,8 @@ const closesAt = DateTime.fromObject({
   // Store reservation
   state.reservations[reservationId] = reservation;
 
-  // Cache idempotency key
-  state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
-    userId,
-    body: JSON.stringify(req.body),
-    response: reservation
-  };
-
-  res.status(201).json({
+  // Prepare the exact response that will be sent
+  const responseToSend = {
     reservation_id: reservationId,
     reference,
     user_id: userId,
@@ -960,7 +954,16 @@ const closesAt = DateTime.fromObject({
     party_size,
     status: 'confirmed',
     created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
-  });
+  };
+
+  // Cache idempotency key with the exact response
+  state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
+    userId,
+    body: JSON.stringify(req.body),
+    response: responseToSend
+  };
+
+  res.status(201).json(responseToSend);
 });
 
 app.get('/reservations', authenticate, (req, res) => {
