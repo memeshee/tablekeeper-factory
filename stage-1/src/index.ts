@@ -949,7 +949,7 @@ const closesAt = DateTime.fromObject({
   };
 
   res.status(201).json({
-    id: reservationId,
+    reservation_id: reservationId,
     reference,
     user_id: userId,
     restaurant_id,
