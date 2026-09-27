@@ -118,6 +118,23 @@ const getReservationById = (id: string): Reservation | undefined => {
   return state.reservations[id];
 };
 
+// Serialize reservation object to consistent format
+const serializeReservation = (reservation: Reservation): any => {
+  return {
+    reservation_id: reservation.id,
+    reference: reservation.reference,
+    user_id: reservation.user_id,
+    restaurant_id: reservation.restaurant_id,
+    table_id: reservation.table_id,
+    starts_at_local: reservation.starts_at_local,
+    starts_at: reservation.starts_at,
+    ends_at: reservation.ends_at,
+    party_size: reservation.party_size,
+    status: reservation.status,
+    created_at: reservation.created_at
+  };
+};
+
 // Middleware
 const authenticate = (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
@@ -963,7 +980,7 @@ const closesAt = DateTime.fromObject({
     response: responseToSend
   };
 
-  res.status(201).json(responseToSend);
+  res.status(201).json(serializeReservation(reservation));
 });
 
 app.get('/reservations', authenticate, (req, res) => {
