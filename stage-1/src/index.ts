@@ -178,7 +178,20 @@ app.post('/_test/reset', (req, res) => {
 
   // Load fixture data
   fixture.users.forEach(user => {
-    state.users[user.id] = user;
+    // Hash password if it exists (for seeded users)
+    if ((user as any).password) {
+      const hashedPassword = bcrypt.hashSync((user as any).password, 10);
+      // Create a new user object with hashed password
+      const userWithHash = {
+        ...user,
+        password_hash: hashedPassword
+      };
+      // Remove password field from the object
+      delete (userWithHash as any).password;
+      state.users[user.id] = userWithHash as User;
+    } else {
+      state.users[user.id] = user;
+    }
   });
 
   fixture.restaurants.forEach(restaurant => {
