@@ -631,11 +631,23 @@ app.post('/reservations', authenticate, (req, res) => {
   const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
   if (keyEntry) {
     // If same body, return the cached response
-    // Normalize the JSON string for comparison to ensure exact byte matching
-    const normalizedReqBody = JSON.stringify(req.body, Object.keys(req.body).sort());
-    if (normalizedReqBody === keyEntry.body) {
-      return res.status(200).json(keyEntry.response);
-    } else {
+    // For exact byte matching, we need to be careful about JSON serialization
+    // Use the exact same serialization method that was used when caching
+    try {
+      const parsedReqBody = JSON.parse(JSON.stringify(req.body));
+      const normalizedReqBody = JSON.stringify(parsedReqBody);
+      if (normalizedReqBody === keyEntry.body) {
+        return res.status(200).json(keyEntry.response);
+      } else {
+        return res.status(409).json({
+          error: {
+            code: 'idempotency_key_reuse',
+            message: 'Idempotency key already used with different request body'
+          }
+        });
+      }
+    } catch (e) {
+      // If parsing fails, treat as different body
       return res.status(409).json({
         error: {
           code: 'idempotency_key_reuse',
