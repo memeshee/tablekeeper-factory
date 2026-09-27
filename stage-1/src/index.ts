@@ -705,11 +705,11 @@ const closesAt = DateTime.fromObject({
   }
 
   // Create reservation
-  const reservationId = `res_${uuidv4().substring(0, 12)}`;
+  const reservationId = `res_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
   const reference = generateReference();
   
   const reservation: Reservation = {
-    reservation_id: reservationId, // Changed from 'id' to 'reservation_id' to match spec
+    id: reservationId,
     reference,
     user_id: userId,
     restaurant_id,
@@ -756,9 +756,9 @@ app.get('/reservations', authenticate, (req, res) => {
     return new Date(b.starts_at).getTime() - new Date(a.starts_at).getTime();
   });
 
-  // Convert to the correct response format (using reservation_id instead of id)
+  // Convert to the correct response format (using id)
   const formattedReservations = userReservations.map(r => ({
-    reservation_id: r.id, // Map internal id to reservation_id
+    id: r.id,
     reference: r.reference,
     user_id: r.user_id,
     restaurant_id: r.restaurant_id,
@@ -801,7 +801,7 @@ app.get('/reservations/:reference', authenticate, (req, res) => {
   
   // Convert to correct response format
   res.status(200).json({
-    reservation_id: reservation.id,
+    id: reservation.id,
     reference: reservation.reference,
     user_id: reservation.user_id,
     restaurant_id: reservation.restaurant_id,
