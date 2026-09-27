@@ -338,6 +338,9 @@ app.post('/_test/reset', (req, res) => {
     }
   }
   
+  // Save tokens to preserve them across reset
+  const savedTokens = state.tokens;
+  
   // Clear current state only after validation passes
   state = {
     users: {},
@@ -345,7 +348,7 @@ app.post('/_test/reset', (req, res) => {
     reservations: {},
     idempotencyKeys: {},
     exportState: null,
-    tokens: {} // Clear tokens so fixture users can log in fresh
+    tokens: savedTokens // Preserve issued tokens
   };
 
   // Load fixture data
@@ -1154,7 +1157,8 @@ app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
   // Cancel reservation
   reservation.status = 'cancelled';
   
-  res.status(200).json(serializeReservation(reservation));
+  // Return the reservation object directly to avoid re-serialization issues
+  res.status(200).json(reservation);
 });
 
 app.patch('/reservations/:reference', authenticate, (req, res) => {
