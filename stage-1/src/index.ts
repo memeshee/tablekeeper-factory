@@ -567,7 +567,9 @@ app.post('/reservations', authenticate, (req, res) => {
   const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
   if (keyEntry) {
     // If same body, return the cached response
-    if (JSON.stringify(req.body) === keyEntry.body) {
+    // Normalize the JSON string for comparison to ensure exact byte matching
+    const normalizedReqBody = JSON.stringify(req.body, Object.keys(req.body).sort());
+    if (normalizedReqBody === keyEntry.body) {
       return res.status(200).json(keyEntry.response);
     } else {
       return res.status(409).json({
