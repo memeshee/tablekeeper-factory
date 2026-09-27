@@ -176,6 +176,19 @@ const errorHandler = (err: any, req: Request, res: Response, next: NextFunction)
   });
 };
 
+// Express error handling middleware for JSON parsing errors
+const jsonErrorHandler = (err: any, req: Request, res: Response, next: NextFunction) => {
+  if (err && err.name === 'SyntaxError') {
+    return res.status(400).json({
+      error: {
+        code: 'malformed_request',
+        message: 'Malformed JSON request'
+      }
+    });
+  }
+  next(err);
+};
+
 // Routes
 // Health endpoint
 app.get('/health', (req, res) => {
@@ -442,6 +455,34 @@ app.post('/_test/import', (req, res) => {
 app.post('/auth/signup', (req, res) => {
   const { email, password, display_name } = req.body;
 
+  // Validate inputs - type-check before value-check
+  if (typeof email !== 'string') {
+    return res.status(400).json({
+      error: {
+        code: 'malformed_request',
+        message: 'Email must be a string'
+      }
+    });
+  }
+  
+  if (typeof password !== 'string') {
+    return res.status(400).json({
+      error: {
+        code: 'malformed_request',
+        message: 'Password must be a string'
+      }
+    });
+  }
+  
+  if (typeof display_name !== 'string') {
+    return res.status(400).json({
+      error: {
+        code: 'malformed_request',
+        message: 'Display name must be a string'
+      }
+    });
+  }
+
   // Validate inputs
   if (!validateEmail(email)) {
     return res.status(422).json({
@@ -461,7 +502,9 @@ app.post('/auth/signup', (req, res) => {
     });
   }
 
-  if (state.users[email]) {
+  // Check if email already exists (search through all users)
+  const existingUser = Object.values(state.users).find(user => user.email === email);
+  if (existingUser) {
     return res.status(409).json({
       error: {
         code: 'email_taken',
@@ -1586,7 +1629,8 @@ app.post('/reservation-moves', authenticate, (req, res) => {
   }
 });
 
-// Add error handler
+// Add error handlers
+app.use(jsonErrorHandler);
 app.use(errorHandler);
 
 // Start server
