@@ -3,10 +3,7 @@ FROM node:18-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
-
-# Compile TypeScript to JavaScript
-RUN npx tsc
+RUN npm ci --only=production
 
 COPY . .
 
