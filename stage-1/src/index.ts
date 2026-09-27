@@ -341,7 +341,17 @@ app.post('/_test/reset', (req, res) => {
   });
 
   fixture.reservations.forEach(reservation => {
-    state.reservations[reservation.id] = reservation;
+    // Apply the same normalization that happens during creation
+    const normalizedReservation = {
+      ...reservation,
+      // Ensure reservation has required fields
+      status: reservation.status || 'confirmed',
+      // Convert starts_at and ends_at to ISO format if needed
+      starts_at: reservation.starts_at || '',
+      ends_at: reservation.ends_at || ''
+    };
+    
+    state.reservations[normalizedReservation.id] = normalizedReservation;
   });
 
   res.status(204).send();
@@ -758,12 +768,13 @@ app.post('/reservations', authenticate, (req, res) => {
   const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
   if (keyEntry) {
     // If same body, return the cached response
-    // For exact byte matching, we need to be careful about JSON serialization
+    // For exact byte matching, we need to be very careful about JSON serialization
     // Use the exact same serialization method that was used when caching
     try {
-      const parsedReqBody = JSON.parse(JSON.stringify(req.body));
-      const normalizedReqBody = JSON.stringify(parsedReqBody);
-      if (normalizedReqBody === keyEntry.body) {
+      // We store the body as JSON string, so we compare with the same approach
+      // The key issue is that when we store it, we use JSON.stringify(req.body)
+      // But when we compare, we should make sure we're comparing the same way
+      if (JSON.stringify(req.body) === keyEntry.body) {
         return res.status(200).json(keyEntry.response);
       } else {
         return res.status(409).json({
@@ -938,7 +949,7 @@ const closesAt = DateTime.fromObject({
   };
 
   res.status(201).json({
-    reservation_id: reservationId,
+    id: reservationId,
     reference,
     user_id: userId,
     restaurant_id,
@@ -1065,6 +1076,7 @@ app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
   const now = DateTime.now();
   const timeUntilStart = startsAt.diff(now, 'minutes').minutes;
   
+  // Use absolute instants for cutoff comparison (not local times)
   if (timeUntilStart <= restaurant.cancellation_cutoff_minutes) {
     return res.status(409).json({
       error: {
@@ -1297,6 +1309,178 @@ updatedReservation.ends_at = updatedEndsAt.toISO({ suppressMilliseconds: true })
 
   state.reservations[reservation.id] = updatedReservation;
 
+  res.status(200).json(updatedReservation);
+});
+
+// Reservation moves route
+app.post('/reservation-moves', authenticate, (req, res) => {
+  const { reference, starts_at_local } = req.body;
+  const userId = (req as any).user.id;
+  
+  // Validate required fields
+  if (!reference || !starts_at_local) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Missing required fields: reference and starts_at_local'
+      }
+    });
+  }
+  
+  // Validate time format
+  if (!validateTimeFormat(starts_at_local)) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid time format'
+      }
+    });
+  }
+  
+  // Get the reservation
+  const reservation = getReservationByReference(reference);
+  
+  if (!reservation) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Reservation not found'
+      }
+    });
+  }
+  
+  // Check ownership
+  if (reservation.user_id !== userId) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Reservation not found'
+      }
+    });
+  }
+  
+  // Validate that the reservation is not already cancelled
+  if (reservation.status === 'cancelled') {
+    return res.status(409).json({
+      error: {
+        code: 'reservation_cancelled',
+        message: 'Cannot move a cancelled reservation'
+      }
+    });
+  }
+  
+  // Get restaurant
+  const restaurant = getRestaurantById(reservation.restaurant_id);
+  if (!restaurant) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Restaurant not found'
+      }
+    });
+  }
+  
+  // Parse start time
+  const startsAt = DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
+  if (!startsAt.isValid) {
+    return res.status(422).json({
+      error: {
+        code: 'invalid_local_time',
+        message: 'Invalid local time'
+      }
+    });
+  }
+  
+  // Check if start time is on slot grid
+  const startMinutes = startsAt.hour * 60 + startsAt.minute;
+  if (startMinutes % restaurant.slot_minutes !== 0) {
+    return res.status(422).json({
+      error: {
+        code: 'not_on_slot_grid',
+        message: 'Start time is not on slot grid'
+      }
+    });
+  }
+  
+  // Check if reservation would be within opening hours
+  const weekday = startsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][startsAt.weekday - 1];
+  const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
+  if (!openingHour) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation outside opening hours'
+      }
+    });
+  }
+
+  const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
+  const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
+
+  const opensAt = DateTime.fromObject({
+    year: startsAt.year,
+    month: startsAt.month,
+    day: startsAt.day,
+    hour: openHour,
+    minute: openMinute
+  }, { zone: restaurant.timezone });
+
+  const closesAt = DateTime.fromObject({
+    year: startsAt.year,
+    month: startsAt.month,
+    day: startsAt.day,
+    hour: closeHour,
+    minute: closeMinute
+  }, { zone: restaurant.timezone });
+
+  if (startsAt < opensAt || startsAt >= closesAt) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation outside opening hours'
+      }
+    });
+  }
+  
+  // Check if reservation would end after closing
+  const endsAt = startsAt.plus({ minutes: restaurant.reservation_duration_minutes });
+  if (endsAt > closesAt) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation would end after closing'
+      }
+    });
+  }
+  
+  // Check for overlapping reservations
+  const reservationConflict = Object.values(state.reservations).find(res => {
+    if (res.id === reservation.id || res.table_id !== reservation.table_id || res.status !== 'confirmed') return false;
+    
+    const resStart = DateTime.fromISO(res.starts_at);
+    const resEnd = DateTime.fromISO(res.ends_at);
+    
+    // Check for overlap
+    return !(endsAt <= resStart || startsAt >= resEnd);
+  });
+
+  if (reservationConflict) {
+    return res.status(409).json({
+      error: {
+        code: 'table_unavailable',
+        message: 'Table is not available at the requested time'
+      }
+    });
+  }
+  
+  // Update reservation
+  const updatedReservation = { ...reservation };
+  updatedReservation.starts_at_local = starts_at_local;
+  updatedReservation.starts_at = startsAt.toISO({ suppressMilliseconds: true }) || '';
+  updatedReservation.ends_at = endsAt.toISO({ suppressMilliseconds: true }) || '';
+  
+  state.reservations[reservation.id] = updatedReservation;
+  
   res.status(200).json(updatedReservation);
 });
 
