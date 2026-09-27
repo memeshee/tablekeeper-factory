@@ -1103,9 +1103,12 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   const reservation = getReservationByReference(reference || '');
   
   if (!reservation) {
-    // Per requirement: PATCH with unknown reference returns 200 (not 404)
-    // This is unusual but required by the test suite
-    return res.status(200).json({});
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Reservation not found'
+      }
+    });
   }
   
   // Check ownership
@@ -1179,7 +1182,20 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
 
   if (!changesMade) {
     // No changes made, return current reservation
-    return res.status(200).json(reservation);
+    // Use the same response format as create endpoint
+    return res.status(200).json({
+      reservation_id: reservation.id,
+      reference: reservation.reference,
+      user_id: reservation.user_id,
+      restaurant_id: reservation.restaurant_id,
+      table_id: reservation.table_id,
+      starts_at_local: reservation.starts_at_local,
+      starts_at: reservation.starts_at,
+      ends_at: reservation.ends_at,
+      party_size: reservation.party_size,
+      status: reservation.status,
+      created_at: reservation.created_at
+    });
   }
 
   // Validate changes
