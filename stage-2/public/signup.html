@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tablekeeper - Signup</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; max-width: 400px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; }
+        input { padding: 8px; width: 100%; box-sizing: border-box; }
+        button { padding: 10px 15px; background-color: #007bff; color: white; border: none; cursor: pointer; width: 100%; }
+        button:hover { background-color: #0056b3; }
+        .error { color: red; margin-top: 10px; }
+        .success { color: green; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Tablekeeper - Signup</h1>
+    
+    <div class="form-group">
+        <label for="signup-email">Email:</label>
+        <input type="email" data-testid="signup-email" id="signup-email">
+    </div>
+    
+    <div class="form-group">
+        <label for="signup-display-name">Display Name:</label>
+        <input type="text" data-testid="signup-display-name" id="signup-display-name">
+    </div>
+    
+    <div class="form-group">
+        <label for="signup-password">Password:</label>
+        <input type="password" data-testid="signup-password" id="signup-password">
+    </div>
+    
+    <button data-testid="signup-submit" id="signup-submit">Sign Up</button>
+    
+    <div data-testid="auth-error" id="auth-error" class="error" style="display:none;"></div>
+    
+    <p><a href="/login">Already have an account? Login</a></p>
+    
+    <script>
+        // DOM Elements
+        const signupEmail = document.getElementById('signup-email');
+        const signupDisplayName = document.getElementById('signup-display-name');
+        const signupPassword = document.getElementById('signup-password');
+        const signupSubmit = document.getElementById('signup-submit');
+        const authError = document.getElementById('auth-error');
+        
+        // Setup event listeners
+        signupSubmit.addEventListener('click', signup);
+        
+        // Signup function
+        async function signup() {
+            const email = signupEmail.value;
+            const displayName = signupDisplayName.value;
+            const password = signupPassword.value;
+            
+            if (!email || !displayName || !password) {
+                authError.textContent = 'Please fill in all fields';
+                authError.style.display = 'block';
+                return;
+            }
+            
+            if (password.length < 8) {
+                authError.textContent = 'Password must be at least 8 characters';
+                authError.style.display = 'block';
+                return;
+            }
+            
+            try {
+                const response = await fetch('/auth/signup', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email, display_name: displayName, password })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // Store token
+                    localStorage.setItem('token', data.token);
+                    // Redirect to home
+                    window.location.href = '/';
+                } else {
+                    authError.textContent = data.error?.message || 'Signup failed';
+                    authError.style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error signing up:', error);
+                authError.textContent = 'Network error during signup';
+                authError.style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>
