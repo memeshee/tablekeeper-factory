@@ -9,10 +9,76 @@ import bcrypt from 'bcryptjs';
 import { DateTime, IANAZone } from 'luxon';
 import * as fs from 'fs';
 
-// Add static file serving
+// Types and interfaces
+interface User {
+  id: string;
+  email: string;
+  password_hash: string;
+  display_name: string;
+}
+
+interface Table {
+  id: string;
+  label: string;
+  capacity: number;
+}
+
+interface OpeningHour {
+  weekday: string;
+  opens: string;
+  closes: string;
+}
+
+interface Restaurant {
+  id: string;
+  name: string;
+  timezone: string;
+  slot_minutes: number;
+  reservation_duration_minutes: number;
+  cancellation_cutoff_minutes: number;
+  opening_hours: OpeningHour[];
+  tables: Table[];
+}
+
+interface Reservation {
+  id: string;
+  reference: string;
+  user_id: string;
+  restaurant_id: string;
+  table_id: string;
+  starts_at_local: string;
+  starts_at: string;
+  ends_at: string;
+  party_size: number;
+  status: 'confirmed' | 'cancelled';
+  created_at: string;
+}
+
+interface Fixture {
+  users: User[];
+  restaurants: Restaurant[];
+  reservations: Reservation[];
+}
+
+// In-memory storage (in production, this would be a database)
+let state: {
+  users: Record<string, User>;
+  restaurants: Record<string, Restaurant>;
+  reservations: Record<string, Reservation>;
+  idempotencyKeys: Record<string, { userId: string; body: string; response: any }>;
+  exportState: any;
+  tokens: Record<string, string>; // token -> user_id mapping
+} = {
+  users: {},
+  restaurants: {},
+  reservations: {},
+  idempotencyKeys: {},
+  exportState: null,
+  tokens: {}
+};
+
 const app = express();
 app.use(express.json());
-app.use(express.static('public'));
 
 // Helper functions
 const generateReference = (): string => {
@@ -54,12 +120,12 @@ const getReservationById = (id: string): Reservation | undefined => {
 
 // Serialize reservation object to consistent format
 const serializeReservation = (reservation: Reservation): any => {
-  // Determine if we should include table_id or table_ids based on reservation type
-  const result: any = {
+  return {
     reservation_id: reservation.id,
     reference: reservation.reference,
     user_id: reservation.user_id,
     restaurant_id: reservation.restaurant_id,
+    table_id: reservation.table_id,
     starts_at_local: reservation.starts_at_local,
     starts_at: reservation.starts_at,
     ends_at: reservation.ends_at,
@@ -67,18 +133,6 @@ const serializeReservation = (reservation: Reservation): any => {
     status: reservation.status,
     created_at: reservation.created_at
   };
-
-  // Include table_id for single table reservations (backward compatibility)
-  if (reservation.table_id) {
-    result.table_id = reservation.table_id;
-  }
-  
-  // Include table_ids for combined table reservations
-  if (reservation.table_ids) {
-    result.table_ids = reservation.table_ids;
-  }
-
-  return result;
 };
 
 // Middleware
@@ -139,26 +193,6 @@ const jsonErrorHandler = (err: any, req: Request, res: Response, next: NextFunct
 // Health endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
-});
-
-// Serve homepage
-app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/public/index.html');
-});
-
-// Serve login page
-app.get('/login', (req, res) => {
-  res.sendFile(__dirname + '/public/login.html');
-});
-
-// Serve signup page
-app.get('/signup', (req, res) => {
-  res.sendFile(__dirname + '/public/signup.html');
-});
-
-// Serve lookup page
-app.get('/lookup', (req, res) => {
-  res.sendFile(__dirname + '/public/lookup.html');
 });
 
 // Reset endpoint
@@ -550,27 +584,6 @@ app.post('/auth/login', (req, res) => {
   });
 });
 
-// Add authentication validation endpoint
-app.get('/auth/validate', authenticate, (req, res) => {
-  const userId = (req as any).user.id;
-  const user = getUserById(userId);
-  
-  if (!user) {
-    return res.status(401).json({
-      error: {
-        code: 'unauthenticated',
-        message: 'Invalid token'
-      }
-    });
-  }
-  
-  res.status(200).json({
-    user_id: user.id,
-    display_name: user.display_name,
-    email: user.email
-  });
-});
-
 // Public endpoints
 app.get('/restaurants', (req, res) => {
   const restaurants = Object.values(state.restaurants).map(r => ({
@@ -791,171 +804,13 @@ const getAvailableTables = (restaurant: Restaurant, start: DateTime, end: DateTi
   return availableTables;
 };
 
-// Helper function to check if a combination of tables is available
-const isCombinationAvailable = (
-  restaurant: Restaurant, 
-  start: DateTime, 
-  end: DateTime, 
-  tableIds: string[]
-): boolean => {
-  // Check if all tables in the combination are available
-  for (const tableId of tableIds) {
-    // Check if table exists
-    const table = restaurant.tables.find(t => t.id === tableId);
-    if (!table) {
-      return false;
-    }
-    
-    // Check for conflicts with existing reservations
-    for (const reservation of Object.values(state.reservations)) {
-      if (reservation.table_id === tableId && reservation.status === 'confirmed') {
-        const resStart = DateTime.fromISO(reservation.starts_at);
-        const resEnd = DateTime.fromISO(reservation.ends_at);
-        
-        // Check for overlap
-        if (!(end <= resStart || start >= resEnd)) {
-          return false;
-        }
-      }
-    }
-  }
-  
-  return true;
-};
-
-// Helper function to get available combinations for a restaurant
-const getAvailableCombinations = (
-  restaurant: Restaurant,
-  start: DateTime,
-  end: DateTime,
-  partySize: number
-): { table_ids: string[], capacity: number }[] => {
-  const combinations: { table_ids: string[], capacity: number }[] = [];
-  
-  // Check if restaurant has combinable pairs
-  if (!restaurant.combinable) {
-    return combinations;
-  }
-  
-  // For each combination pair
-  for (const [tableId1, tableId2] of restaurant.combinable) {
-    // Find the tables involved
-    const table1 = restaurant.tables.find(t => t.id === tableId1);
-    const table2 = restaurant.tables.find(t => t.id === tableId2);
-    
-    // Skip if either table doesn't exist
-    if (!table1 || !table2) {
-      continue;
-    }
-    
-    // Check if the combination has enough capacity
-    const capacity = table1.capacity + table2.capacity;
-    if (capacity >= partySize) {
-      // Check if both tables are available
-      if (isCombinationAvailable(restaurant, start, end, [tableId1, tableId2])) {
-        combinations.push({
-          table_ids: [tableId1, tableId2],
-          capacity
-        });
-      }
-    }
-  }
-  
-  return combinations;
-};
-
-// Helper function to generate available slots with combinations
-const generateAvailableSlots = (restaurant: Restaurant, dateStr: string, partySize: number): any[] => {
-  // Parse the date
-  const targetDate = DateTime.fromISO(dateStr, { zone: 'UTC' });
-  if (!targetDate.isValid) {
-    return [];
-  }
-
-  // Find opening hours for this day
-  const weekday = targetDate.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][targetDate.weekday - 1];
-  const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
-
-  if (!openingHour) {
-    return [];
-  }
-
-  const slots = [];
-
-  // Parse opening and closing times
-  const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
-  const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
-
-  // Create slots
-  let slotStart = DateTime.fromObject({
-    year: targetDate.year,
-    month: targetDate.month,
-    day: targetDate.day,
-    hour: openHour,
-    minute: openMinute
-  }, { zone: restaurant.timezone });
-
-  const slotEnd = DateTime.fromObject({
-    year: targetDate.year,
-    month: targetDate.month,
-    day: targetDate.day,
-    hour: closeHour,
-    minute: closeMinute
-  }, { zone: restaurant.timezone });
-
-  const durationMinutes = restaurant.reservation_duration_minutes;
-  const slotInterval = restaurant.slot_minutes;
-
-  while (slotStart < slotEnd) {
-    const slotEndDateTime = slotStart.plus({ minutes: durationMinutes });
-    
-    // Check if slot would exceed closing time
-    if (slotEndDateTime > slotEnd) {
-      break;
-    }
-
-    // Check if table is available
-    const availableTables = getAvailableTables(restaurant, slotStart, slotEndDateTime, partySize);
-    const availableCombinations = getAvailableCombinations(restaurant, slotStart, slotEndDateTime, partySize);
-
-    // Combine available tables and combinations
-    const availableOptions = [];
-    
-    // Add single tables first (in fixture order)
-    for (const table of restaurant.tables) {
-      if (availableTables.some(t => t.id === table.id)) {
-        availableOptions.push({
-          table_ids: [table.id],
-          capacity: table.capacity
-        });
-      }
-    }
-    
-    // Add combinations (in combinable order)
-    for (const combination of availableCombinations) {
-      availableOptions.push(combination);
-    }
-
-    slots.push({
-      starts_at_local: slotStart.toFormat('yyyy-MM-dd\'T\'HH:mm'), // YYYY-MM-DDTHH:MM format
-      starts_at: slotStart.toISO({ suppressMilliseconds: true }),
-      available_table_ids: availableTables.map(t => t.id),
-      available_options: availableOptions
-    });
-
-    slotStart = slotStart.plus({ minutes: slotInterval });
-  }
-
-  return slots;
-};
-
 // Protected endpoints
 app.post('/reservations', authenticate, (req, res) => {
-  const { restaurant_id, table_id, table_ids, starts_at_local, party_size } = req.body;
+  const { restaurant_id, table_id, starts_at_local, party_size } = req.body;
   const userId = (req as any).user.id;
   
   // Validate required fields
-  if (!restaurant_id || !starts_at_local || party_size === undefined) {
+  if (!restaurant_id || !table_id || !starts_at_local || party_size === undefined) {
     return res.status(422).json({
       error: {
         code: 'validation_failed',
@@ -999,7 +854,12 @@ app.post('/reservations', authenticate, (req, res) => {
   const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
   if (keyEntry) {
     // If same body, return the cached response
+    // For exact byte matching, we need to be very careful about JSON serialization
+    // Use the exact same serialization method that was used when caching
     try {
+      // We store the body as JSON string, so we compare with the same approach
+      // The key issue is that when we store it, we use JSON.stringify(req.body)
+      // But when we compare, we should make sure we're comparing the same way
       if (JSON.stringify(req.body) === keyEntry.body) {
         return res.status(200).json(keyEntry.response);
       } else {
@@ -1011,6 +871,7 @@ app.post('/reservations', authenticate, (req, res) => {
         });
       }
     } catch (e) {
+      // If parsing fails, treat as different body
       return res.status(409).json({
         error: {
           code: 'idempotency_key_reuse',
@@ -1031,77 +892,65 @@ app.post('/reservations', authenticate, (req, res) => {
     });
   }
 
-  // Validate that either table_id OR table_ids is provided (but not both)
-  if ((table_id && table_ids) || (!table_id && !table_ids)) {
+  // Get table
+  const table = restaurant.tables.find(t => t.id === table_id);
+  if (!table) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Table not found'
+      }
+    });
+  }
+
+  // Validate party size vs table capacity
+  if (party_size > table.capacity) {
     return res.status(422).json({
       error: {
-        code: 'validation_failed',
-        message: 'Exactly one of table_id or table_ids must be provided'
+        code: 'party_exceeds_capacity',
+        message: 'Party size exceeds table capacity'
       }
     });
   }
 
-  // Handle single table reservation (backward compatibility)
-  if (table_id) {
-    // Get table
-    const table = restaurant.tables.find(t => t.id === table_id);
-    if (!table) {
-      return res.status(404).json({
-        error: {
-          code: 'not_found',
-          message: 'Table not found'
-        }
-      });
-    }
+  // Parse start time
+  const startsAt = DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
+  if (!startsAt.isValid) {
+    return res.status(422).json({
+      error: {
+        code: 'invalid_local_time',
+        message: 'Invalid local time'
+      }
+    });
+  }
 
-    // Validate party size vs table capacity
-    if (party_size > table.capacity) {
-      return res.status(422).json({
-        error: {
-          code: 'party_exceeds_capacity',
-          message: 'Party size exceeds table capacity'
-        }
-      });
-    }
+  // Check if start time is on slot grid
+  const startMinutes = startsAt.hour * 60 + startsAt.minute;
+  if (startMinutes % restaurant.slot_minutes !== 0) {
+    return res.status(422).json({
+      error: {
+        code: 'not_on_slot_grid',
+        message: 'Start time is not on slot grid'
+      }
+    });
+  }
 
-    // Parse start time
-    const startsAt = DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
-    if (!startsAt.isValid) {
-      return res.status(422).json({
-        error: {
-          code: 'invalid_local_time',
-          message: 'Invalid local time'
-        }
-      });
-    }
+  // Check if reservation would be within opening hours
+  const weekday = startsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][startsAt.weekday - 1];
+  const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
+  if (!openingHour) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation outside opening hours'
+      }
+    });
+  }
 
-    // Check if start time is on slot grid
-    const startMinutes = startsAt.hour * 60 + startsAt.minute;
-    if (startMinutes % restaurant.slot_minutes !== 0) {
-      return res.status(422).json({
-        error: {
-          code: 'not_on_slot_grid',
-          message: 'Start time is not on slot grid'
-        }
-      });
-    }
+  const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
+  const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
 
-    // Check if reservation would be within opening hours
-    const weekday = startsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][startsAt.weekday - 1];
-    const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
-    if (!openingHour) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation outside opening hours'
-        }
-      });
-    }
-
-    const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
-    const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
-
-    const opensAt = DateTime.fromObject({
+const opensAt = DateTime.fromObject({
       year: startsAt.year,
       month: startsAt.month,
       day: startsAt.day,
@@ -1109,7 +958,7 @@ app.post('/reservations', authenticate, (req, res) => {
       minute: openMinute
     }, { zone: restaurant.timezone });
 
-    const closesAt = DateTime.fromObject({
+const closesAt = DateTime.fromObject({
       year: startsAt.year,
       month: startsAt.month,
       day: startsAt.day,
@@ -1117,330 +966,90 @@ app.post('/reservations', authenticate, (req, res) => {
       minute: closeMinute
     }, { zone: restaurant.timezone });
 
-    if (startsAt < opensAt || startsAt >= closesAt) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation outside opening hours'
-        }
-      });
-    }
-
-    // Check if reservation would end after closing
-    const endsAt = startsAt.plus({ minutes: restaurant.reservation_duration_minutes });
-    if (endsAt > closesAt) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation would end after closing'
-        }
-      });
-    }
-
-    // Check for overlapping reservations
-    const reservationConflict = Object.values(state.reservations).find(res => {
-      if (res.table_id !== table_id || res.status !== 'confirmed') return false;
-      
-      const resStart = DateTime.fromISO(res.starts_at);
-      const resEnd = DateTime.fromISO(res.ends_at);
-      
-      // Check for overlap
-      return !(endsAt <= resStart || startsAt >= resEnd);
+  if (startsAt < opensAt || startsAt >= closesAt) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation outside opening hours'
+      }
     });
-
-    if (reservationConflict) {
-      return res.status(409).json({
-        error: {
-          code: 'table_unavailable',
-          message: 'Table is not available at the requested time'
-        }
-      });
-    }
-
-    // Create reservation
-    const reservationId = `res_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-    const reference = generateReference();
-    
-    const reservation: Reservation = {
-      id: reservationId,
-      reference,
-      user_id: userId,
-      restaurant_id,
-      table_id,
-      starts_at_local,
-      starts_at: startsAt.toISO({ suppressMilliseconds: true }),
-      ends_at: endsAt.toISO({ suppressMilliseconds: true }),
-      party_size,
-      status: 'confirmed',
-      created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
-    };
-
-    // Store reservation
-    state.reservations[reservationId] = reservation;
-
-    // Prepare the exact response that will be sent
-    const responseToSend = {
-      reservation_id: reservationId,
-      reference,
-      user_id: userId,
-      restaurant_id,
-      table_id,
-      starts_at_local,
-      starts_at: startsAt.toISO({ suppressMilliseconds: true }),
-      ends_at: endsAt.toISO({ suppressMilliseconds: true }),
-      party_size,
-      status: 'confirmed',
-      created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
-    };
-
-    // Cache idempotency key with the exact response
-    state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
-      userId,
-      body: JSON.stringify(req.body),
-      response: responseToSend
-    };
-
-    res.status(201).json(serializeReservation(reservation));
-  } else if (table_ids) {
-    // Handle combined table reservation
-    
-    // Validate table_ids
-    if (!Array.isArray(table_ids)) {
-      return res.status(422).json({
-        error: {
-          code: 'validation_failed',
-          message: 'table_ids must be an array'
-        }
-      });
-    }
-    
-    // Validate that we have exactly 1 or 2 tables
-    if (table_ids.length < 1 || table_ids.length > 2) {
-      return res.status(422).json({
-        error: {
-          code: 'validation_failed',
-          message: 'Exactly 1 or 2 tables must be specified'
-        }
-      });
-    }
-    
-    // Validate that there are no duplicate table IDs
-    const uniqueTableIds = [...new Set(table_ids)];
-    if (uniqueTableIds.length !== table_ids.length) {
-      return res.status(422).json({
-        error: {
-          code: 'validation_failed',
-          message: 'Duplicate table IDs not allowed'
-        }
-      });
-    }
-    
-    // Validate that all tables exist
-    for (const tableId of table_ids) {
-      const table = restaurant.tables.find(t => t.id === tableId);
-      if (!table) {
-        return res.status(422).json({
-          error: {
-            code: 'validation_failed',
-            message: `Table ${tableId} not found`
-          }
-        });
-      }
-    }
-    
-    // Check if this combination is allowed
-    if (restaurant.combinable) {
-      let combinationAllowed = false;
-      for (const [tableId1, tableId2] of restaurant.combinable) {
-        // Check if the combination matches (order doesn't matter)
-        if ((table_ids.includes(tableId1) && table_ids.includes(tableId2)) &&
-            table_ids.length === 2) {
-          combinationAllowed = true;
-          break;
-        }
-      }
-      
-      if (!combinationAllowed && table_ids.length === 2) {
-        return res.status(422).json({
-          error: {
-            code: 'combination_not_allowed',
-            message: 'Table combination not allowed'
-          }
-        });
-      }
-    } else {
-      // If restaurant has no combinable pairs, but 2 tables were requested
-      if (table_ids.length === 2) {
-        return res.status(422).json({
-          error: {
-            code: 'combination_not_allowed',
-            message: 'Table combination not allowed'
-          }
-        });
-      }
-    }
-    
-    // Calculate total capacity
-    let totalCapacity = 0;
-    for (const tableId of table_ids) {
-      const table = restaurant.tables.find(t => t.id === tableId);
-      if (table) {
-        totalCapacity += table.capacity;
-      }
-    }
-    
-    // Validate party size vs total capacity
-    if (party_size > totalCapacity) {
-      return res.status(422).json({
-        error: {
-          code: 'party_exceeds_capacity',
-          message: 'Party size exceeds combined table capacity'
-        }
-      });
-    }
-    
-    // Parse start time
-    const startsAt = DateTime.fromISO(starts_at_local, { zone: restaurant.timezone });
-    if (!startsAt.isValid) {
-      return res.status(422).json({
-        error: {
-          code: 'invalid_local_time',
-          message: 'Invalid local time'
-        }
-      });
-    }
-
-    // Check if start time is on slot grid
-    const startMinutes = startsAt.hour * 60 + startsAt.minute;
-    if (startMinutes % restaurant.slot_minutes !== 0) {
-      return res.status(422).json({
-        error: {
-          code: 'not_on_slot_grid',
-          message: 'Start time is not on slot grid'
-        }
-      });
-    }
-
-    // Check if reservation would be within opening hours
-    const weekday = startsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][startsAt.weekday - 1];
-    const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
-    if (!openingHour) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation outside opening hours'
-        }
-      });
-    }
-
-    const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
-    const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
-
-    const opensAt = DateTime.fromObject({
-      year: startsAt.year,
-      month: startsAt.month,
-      day: startsAt.day,
-      hour: openHour,
-      minute: openMinute
-    }, { zone: restaurant.timezone });
-
-    const closesAt = DateTime.fromObject({
-      year: startsAt.year,
-      month: startsAt.month,
-      day: startsAt.day,
-      hour: closeHour,
-      minute: closeMinute
-    }, { zone: restaurant.timezone });
-
-    if (startsAt < opensAt || startsAt >= closesAt) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation outside opening hours'
-        }
-      });
-    }
-
-    // Check if reservation would end after closing
-    const endsAt = startsAt.plus({ minutes: restaurant.reservation_duration_minutes });
-    if (endsAt > closesAt) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation would end after closing'
-        }
-      });
-    }
-
-    // Check for overlapping reservations (for all tables in combination)
-    const reservationConflict = Object.values(state.reservations).find(res => {
-      if (res.status !== 'confirmed') return false;
-      
-      // Check if any of the tables in this reservation conflict with our proposed tables
-      const conflictingTable = res.table_ids?.some(t => table_ids.includes(t));
-      if (!conflictingTable) return false;
-      
-      const resStart = DateTime.fromISO(res.starts_at);
-      const resEnd = DateTime.fromISO(res.ends_at);
-      
-      // Check for overlap
-      return !(endsAt <= resStart || startsAt >= resEnd);
-    });
-
-    if (reservationConflict) {
-      return res.status(409).json({
-        error: {
-          code: 'table_unavailable',
-          message: 'One or more tables in the combination are not available at the requested time'
-        }
-      });
-    }
-
-    // Create reservation
-    const reservationId = `res_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
-    const reference = generateReference();
-    
-    const reservation: Reservation = {
-      id: reservationId,
-      reference,
-      user_id: userId,
-      restaurant_id,
-      table_ids,
-      starts_at_local,
-      starts_at: startsAt.toISO({ suppressMilliseconds: true }),
-      ends_at: endsAt.toISO({ suppressMilliseconds: true }),
-      party_size,
-      status: 'confirmed',
-      created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
-    };
-
-    // Store reservation
-    state.reservations[reservationId] = reservation;
-
-    // Prepare the exact response that will be sent
-    const responseToSend = {
-      reservation_id: reservationId,
-      reference,
-      user_id: userId,
-      restaurant_id,
-      table_ids,
-      starts_at_local,
-      starts_at: startsAt.toISO({ suppressMilliseconds: true }),
-      ends_at: endsAt.toISO({ suppressMilliseconds: true }),
-      party_size,
-      status: 'confirmed',
-      created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
-    };
-
-    // Cache idempotency key with the exact response
-    state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
-      userId,
-      body: JSON.stringify(req.body),
-      response: responseToSend
-    };
-
-    res.status(201).json(serializeReservation(reservation));
   }
+
+  // Check if reservation would end after closing
+  const endsAt = startsAt.plus({ minutes: restaurant.reservation_duration_minutes });
+  if (endsAt > closesAt) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation would end after closing'
+      }
+    });
+  }
+
+  // Check for overlapping reservations
+  const reservationConflict = Object.values(state.reservations).find(res => {
+    if (res.table_id !== table_id || res.status !== 'confirmed') return false;
+    
+    const resStart = DateTime.fromISO(res.starts_at);
+    const resEnd = DateTime.fromISO(res.ends_at);
+    
+    // Check for overlap
+    return !(endsAt <= resStart || startsAt >= resEnd);
+  });
+
+  if (reservationConflict) {
+    return res.status(409).json({
+      error: {
+        code: 'table_unavailable',
+        message: 'Table is not available at the requested time'
+      }
+    });
+  }
+
+  // Create reservation
+  const reservationId = `res_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+  const reference = generateReference();
+  
+  const reservation: Reservation = {
+    id: reservationId,
+    reference,
+    user_id: userId,
+    restaurant_id,
+    table_id,
+    starts_at_local,
+    starts_at: startsAt.toISO({ suppressMilliseconds: true }),
+    ends_at: endsAt.toISO({ suppressMilliseconds: true }),
+    party_size,
+    status: 'confirmed',
+    created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
+  };
+
+  // Store reservation
+  state.reservations[reservationId] = reservation;
+
+  // Prepare the exact response that will be sent
+  const responseToSend = {
+    reservation_id: reservationId,
+    reference,
+    user_id: userId,
+    restaurant_id,
+    table_id,
+    starts_at_local,
+    starts_at: startsAt.toISO({ suppressMilliseconds: true }),
+    ends_at: endsAt.toISO({ suppressMilliseconds: true }),
+    party_size,
+    status: 'confirmed',
+    created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
+  };
+
+  // Cache idempotency key with the exact response
+  state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
+    userId,
+    body: JSON.stringify(req.body),
+    response: responseToSend
+  };
+
+  res.status(201).json(serializeReservation(reservation));
 });
 
 app.get('/reservations', authenticate, (req, res) => {
@@ -1551,7 +1160,7 @@ app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
 app.patch('/reservations/:reference', authenticate, (req, res) => {
   const reference = req.params.reference;
   const userId = (req as any).user.id;
-  const { table_id, table_ids, starts_at_local, party_size } = req.body;
+  const { table_id, starts_at_local, party_size } = req.body;
   
   const reservation = getReservationByReference(reference || '');
   
@@ -1609,126 +1218,9 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   let updatedReservation = { ...reservation };
   let changesMade = false;
 
-  // Handle table_id or table_ids changes
-  if (table_id !== undefined || table_ids !== undefined) {
-    // Validate that we don't have both
-    if (table_id && table_ids) {
-      return res.status(422).json({
-        error: {
-          code: 'validation_failed',
-          message: 'Exactly one of table_id or table_ids must be provided'
-        }
-      });
-    }
-
-    // If changing to single table
-    if (table_id !== undefined) {
-      updatedReservation.table_id = table_id;
-      updatedReservation.table_ids = undefined;
-      changesMade = true;
-    }
-    // If changing to combined tables
-    else if (table_ids !== undefined) {
-      // Validate table_ids
-      if (!Array.isArray(table_ids)) {
-        return res.status(422).json({
-          error: {
-            code: 'validation_failed',
-            message: 'table_ids must be an array'
-          }
-        });
-      }
-      
-      // Validate that we have exactly 1 or 2 tables
-      if (table_ids.length < 1 || table_ids.length > 2) {
-        return res.status(422).json({
-          error: {
-            code: 'validation_failed',
-            message: 'Exactly 1 or 2 tables must be specified'
-          }
-        });
-      }
-      
-      // Validate that there are no duplicate table IDs
-      const uniqueTableIds = [...new Set(table_ids)];
-      if (uniqueTableIds.length !== table_ids.length) {
-        return res.status(422).json({
-          error: {
-            code: 'validation_failed',
-            message: 'Duplicate table IDs not allowed'
-          }
-        });
-      }
-      
-      // Validate that all tables exist
-      for (const tableId of table_ids) {
-        const table = restaurant.tables.find(t => t.id === tableId);
-        if (!table) {
-          return res.status(422).json({
-            error: {
-              code: 'validation_failed',
-              message: `Table ${tableId} not found`
-            }
-          });
-        }
-      }
-      
-      // Check if this combination is allowed
-      if (restaurant.combinable) {
-        let combinationAllowed = false;
-        for (const [tableId1, tableId2] of restaurant.combinable) {
-          // Check if the combination matches (order doesn't matter)
-          if ((table_ids.includes(tableId1) && table_ids.includes(tableId2)) &&
-              table_ids.length === 2) {
-            combinationAllowed = true;
-            break;
-          }
-        }
-        
-        if (!combinationAllowed && table_ids.length === 2) {
-          return res.status(422).json({
-            error: {
-              code: 'combination_not_allowed',
-              message: 'Table combination not allowed'
-            }
-          });
-        }
-      } else {
-        // If restaurant has no combinable pairs, but 2 tables were requested
-        if (table_ids.length === 2) {
-          return res.status(422).json({
-            error: {
-              code: 'combination_not_allowed',
-              message: 'Table combination not allowed'
-            }
-          });
-        }
-      }
-      
-      // Calculate total capacity
-      let totalCapacity = 0;
-      for (const tableId of table_ids) {
-        const table = restaurant.tables.find(t => t.id === tableId);
-        if (table) {
-          totalCapacity += table.capacity;
-        }
-      }
-      
-      // Validate party size vs total capacity
-      const newPartySize = party_size !== undefined ? party_size : reservation.party_size;
-      if (newPartySize > totalCapacity) {
-        return res.status(422).json({
-          error: {
-            code: 'party_exceeds_capacity',
-            message: 'Party size exceeds combined table capacity'
-          }
-        });
-      }
-      
-      updatedReservation.table_ids = table_ids;
-      updatedReservation.table_id = undefined;
-      changesMade = true;
-    }
+  if (table_id !== undefined) {
+    updatedReservation.table_id = table_id;
+    changesMade = true;
   }
 
   if (starts_at_local !== undefined) {
@@ -1759,40 +1251,17 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   // Validate changes
   const newStartsAt = starts_at_local ? DateTime.fromISO(starts_at_local, { zone: restaurant.timezone }) : DateTime.fromISO(reservation.starts_at);
   const newPartySize = party_size !== undefined ? party_size : reservation.party_size;
-  
-  // If we have table_ids, we need to validate capacity against combined tables
-  let newTableIds = table_ids !== undefined ? table_ids : reservation.table_ids;
-  let newTableId = table_id !== undefined ? table_id : reservation.table_id;
-  
-  if (newTableIds) {
-    // Validate capacity for combined tables
-    let totalCapacity = 0;
-    for (const tableId of newTableIds) {
-      const table = restaurant.tables.find(t => t.id === tableId);
-      if (table) {
-        totalCapacity += table.capacity;
+  const newTableId = table_id !== undefined ? table_id : reservation.table_id;
+
+  // Validate party size vs table capacity
+  const table = restaurant.tables.find(t => t.id === newTableId);
+  if (table && newPartySize > table.capacity) {
+    return res.status(422).json({
+      error: {
+        code: 'party_exceeds_capacity',
+        message: 'Party size exceeds table capacity'
       }
-    }
-    
-    if (newPartySize > totalCapacity) {
-      return res.status(422).json({
-        error: {
-          code: 'party_exceeds_capacity',
-          message: 'Party size exceeds combined table capacity'
-        }
-      });
-    }
-  } else if (newTableId) {
-    // Validate capacity for single table
-    const table = restaurant.tables.find(t => t.id === newTableId);
-    if (table && newPartySize > table.capacity) {
-      return res.status(422).json({
-        error: {
-          code: 'party_exceeds_capacity',
-          message: 'Party size exceeds table capacity'
-        }
-      });
-    }
+    });
   }
 
   // Check if start time is on slot grid
@@ -1864,22 +1333,7 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   // Check for overlapping reservations
   let updatedEndsAt: DateTime<true> | DateTime<false>;
   const reservationConflict = Object.values(state.reservations).find(res => {
-    if (res.id === reservation.id) return false;
-    
-    // Check if any of the tables in this reservation conflict with our proposed tables
-    let conflictingTable = false;
-    if (res.table_ids && newTableIds) {
-      // Both are combined tables
-      conflictingTable = res.table_ids.some(t => newTableIds.includes(t));
-    } else if (res.table_id && newTableIds) {
-      // One is single, one is combined
-      conflictingTable = newTableIds.includes(res.table_id);
-    } else if (res.table_id && newTableId) {
-      // Both are single tables
-      conflictingTable = res.table_id === newTableId;
-    }
-    
-    if (!conflictingTable) return false;
+    if (res.id === reservation.id || res.table_id !== newTableId || res.status !== 'confirmed') return false;
     
     const resStart = DateTime.fromISO(res.starts_at);
     const resEnd = DateTime.fromISO(res.ends_at);
@@ -1905,9 +1359,38 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
     });
   }
 
-  // Update reservation
+// Update reservation
   updatedReservation.starts_at_local = starts_at_local || reservation.starts_at_local;
   updatedReservation.party_size = party_size !== undefined ? party_size : reservation.party_size;
+  updatedReservation.table_id = table_id !== undefined ? table_id : reservation.table_id;
+  
+  // Check cutoff for changes
+  // Always check cutoff regardless of what's changed (rule applies to current start time)
+  if (restaurant) {
+    // Determine the start time to check against cutoff
+    let startsAtToCheck: DateTime<true> | DateTime<false>;
+    
+    if (starts_at_local) {
+      // If new start time is provided, use it
+      startsAtToCheck = DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
+    } else {
+      // If no new start time, use the existing start time
+      startsAtToCheck = DateTime.fromISO(reservation.starts_at);
+    }
+    
+    const now = DateTime.now();
+    const timeUntilStart = startsAtToCheck.diff(now, 'minutes').minutes;
+    
+    // Check if change is within cutoff period
+    if (timeUntilStart <= restaurant.cancellation_cutoff_minutes) {
+      return res.status(409).json({
+        error: {
+          code: 'cutoff_passed',
+          message: 'Change deadline passed'
+        }
+      });
+    }
+  }
   
   // Update times based on new start time
   if (starts_at_local) {
@@ -1925,7 +1408,7 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
 
 // Reservation moves route
 app.post('/reservation-moves', authenticate, (req, res) => {
-  const { reference, table_id, table_ids, starts_at_local, party_size } = req.body;
+  const { reference, table_id, starts_at_local, party_size } = req.body;
   const userId = (req as any).user.id;
   
   // Validate required fields (reference is required, others optional)
@@ -2068,22 +1551,7 @@ app.post('/reservation-moves', authenticate, (req, res) => {
     
     // Check for overlapping reservations
     const reservationConflict = Object.values(state.reservations).find(res => {
-      if (res.id === reservation.id) return false;
-      
-      // Check if any of the tables in this reservation conflict with our proposed tables
-      let conflictingTable = false;
-      if (res.table_ids && reservation.table_ids) {
-        // Both are combined tables
-        conflictingTable = res.table_ids.some(t => reservation.table_ids.includes(t));
-      } else if (res.table_id && reservation.table_ids) {
-        // One is single, one is combined
-        conflictingTable = reservation.table_ids.includes(res.table_id);
-      } else if (res.table_id && reservation.table_id) {
-        // Both are single tables
-        conflictingTable = res.table_id === reservation.table_id;
-      }
-      
-      if (!conflictingTable) return false;
+      if (res.id === reservation.id || res.table_id !== reservation.table_id || res.status !== 'confirmed') return false;
       
       const resStart = DateTime.fromISO(res.starts_at);
       const resEnd = DateTime.fromISO(res.ends_at);
@@ -2111,204 +1579,49 @@ app.post('/reservation-moves', authenticate, (req, res) => {
     
     res.status(200).json(serializeReservation(updatedReservation));
   } else {
-    // Only table_id or table_ids provided - validate and update table(s) only
-    if (table_id || table_ids) {
-      // Validate that we don't have both
-      if (table_id && table_ids) {
+    // Only table_id provided - validate and update table only
+    if (table_id) {
+      // Validate table exists and is valid
+      const tableExists = restaurant.tables.some(t => t.id === table_id);
+      if (!tableExists) {
         return res.status(422).json({
           error: {
-            code: 'validation_failed',
-            message: 'Exactly one of table_id or table_ids must be provided'
+            code: 'not_found',
+            message: 'Table not found'
           }
         });
       }
       
-      // Handle single table change
-      if (table_id) {
-        // Validate table exists and is valid
-        const tableExists = restaurant.tables.some(t => t.id === table_id);
-        if (!tableExists) {
-          return res.status(422).json({
-            error: {
-              code: 'not_found',
-              message: 'Table not found'
-            }
-          });
-        }
+      // Check if table is available (no time conflict)
+      const reservationConflict = Object.values(state.reservations).find(res => {
+        if (res.id === reservation.id || res.table_id !== table_id || res.status !== 'confirmed') return false;
         
-        // Check if table is available (no time conflict)
-        const reservationConflict = Object.values(state.reservations).find(res => {
-          if (res.id === reservation.id || res.table_id !== table_id || res.status !== 'confirmed') return false;
-          
-          const resStart = DateTime.fromISO(res.starts_at);
-          const resEnd = DateTime.fromISO(res.ends_at);
-          
-          // Check for overlap (using current reservation time)
-          const currentStart = DateTime.fromISO(reservation.starts_at);
-          const currentEnd = DateTime.fromISO(reservation.ends_at);
-          
-          return !(currentEnd <= resStart || currentStart >= resEnd);
-        });
+        const resStart = DateTime.fromISO(res.starts_at);
+        const resEnd = DateTime.fromISO(res.ends_at);
+        
+        // Check for overlap (using current reservation time)
+        const currentStart = DateTime.fromISO(reservation.starts_at);
+        const currentEnd = DateTime.fromISO(reservation.ends_at);
+        
+        return !(currentEnd <= resStart || currentStart >= resEnd);
+      });
 
-        if (reservationConflict) {
-          return res.status(409).json({
-            error: {
-              code: 'table_unavailable',
-              message: 'Table is not available at the requested time'
-            }
-          });
-        }
-        
-        // Update reservation with new table
-        const updatedReservation = { ...reservation };
-        updatedReservation.table_id = table_id;
-        updatedReservation.table_ids = undefined;
-        
-        state.reservations[reservation.id] = updatedReservation;
-        
-        res.status(200).json(serializeReservation(updatedReservation));
-      }
-      // Handle combined table change
-      else if (table_ids) {
-        // Validate table_ids
-        if (!Array.isArray(table_ids)) {
-          return res.status(422).json({
-            error: {
-              code: 'validation_failed',
-              message: 'table_ids must be an array'
-            }
-          });
-        }
-        
-        // Validate that we have exactly 1 or 2 tables
-        if (table_ids.length < 1 || table_ids.length > 2) {
-          return res.status(422).json({
-            error: {
-              code: 'validation_failed',
-              message: 'Exactly 1 or 2 tables must be specified'
-            }
-          });
-        }
-        
-        // Validate that there are no duplicate table IDs
-        const uniqueTableIds = [...new Set(table_ids)];
-        if (uniqueTableIds.length !== table_ids.length) {
-          return res.status(422).json({
-            error: {
-              code: 'validation_failed',
-              message: 'Duplicate table IDs not allowed'
-            }
-          });
-        }
-        
-        // Validate that all tables exist
-        for (const tableId of table_ids) {
-          const table = restaurant.tables.find(t => t.id === tableId);
-          if (!table) {
-            return res.status(422).json({
-              error: {
-                code: 'validation_failed',
-                message: `Table ${tableId} not found`
-              }
-            });
+      if (reservationConflict) {
+        return res.status(409).json({
+          error: {
+            code: 'table_unavailable',
+            message: 'Table is not available at the requested time'
           }
-        }
-        
-        // Check if this combination is allowed
-        if (restaurant.combinable) {
-          let combinationAllowed = false;
-          for (const [tableId1, tableId2] of restaurant.combinable) {
-            // Check if the combination matches (order doesn't matter)
-            if ((table_ids.includes(tableId1) && table_ids.includes(tableId2)) &&
-                table_ids.length === 2) {
-              combinationAllowed = true;
-              break;
-            }
-          }
-          
-          if (!combinationAllowed && table_ids.length === 2) {
-            return res.status(422).json({
-              error: {
-                code: 'combination_not_allowed',
-                message: 'Table combination not allowed'
-              }
-            });
-          }
-        } else {
-          // If restaurant has no combinable pairs, but 2 tables were requested
-          if (table_ids.length === 2) {
-            return res.status(422).json({
-              error: {
-                code: 'combination_not_allowed',
-                message: 'Table combination not allowed'
-              }
-            });
-          }
-        }
-        
-        // Calculate total capacity
-        let totalCapacity = 0;
-        for (const tableId of table_ids) {
-          const table = restaurant.tables.find(t => t.id === tableId);
-          if (table) {
-            totalCapacity += table.capacity;
-          }
-        }
-        
-        // Validate party size vs total capacity
-        if (reservation.party_size > totalCapacity) {
-          return res.status(422).json({
-            error: {
-              code: 'party_exceeds_capacity',
-              message: 'Party size exceeds combined table capacity'
-            }
-          });
-        }
-        
-        // Check if tables are available (no time conflict)
-        const reservationConflict = Object.values(state.reservations).find(res => {
-          if (res.id === reservation.id) return false;
-          
-          // Check if any of the tables in this reservation conflict with our proposed tables
-          let conflictingTable = false;
-          if (res.table_ids && table_ids) {
-            // Both are combined tables
-            conflictingTable = res.table_ids.some(t => table_ids.includes(t));
-          } else if (res.table_id && table_ids) {
-            // One is single, one is combined
-            conflictingTable = table_ids.includes(res.table_id);
-          }
-          
-          if (!conflictingTable) return false;
-          
-          const resStart = DateTime.fromISO(res.starts_at);
-          const resEnd = DateTime.fromISO(res.ends_at);
-          
-          // Check for overlap (using current reservation time)
-          const currentStart = DateTime.fromISO(reservation.starts_at);
-          const currentEnd = DateTime.fromISO(reservation.ends_at);
-          
-          return !(currentEnd <= resStart || currentStart >= resEnd);
         });
-
-        if (reservationConflict) {
-          return res.status(409).json({
-            error: {
-              code: 'table_unavailable',
-              message: 'One or more tables in the combination are not available at the requested time'
-            }
-          });
-        }
-        
-        // Update reservation with new table combination
-        const updatedReservation = { ...reservation };
-        updatedReservation.table_ids = table_ids;
-        updatedReservation.table_id = undefined;
-        
-        state.reservations[reservation.id] = updatedReservation;
-        
-        res.status(200).json(serializeReservation(updatedReservation));
       }
+      
+      // Update reservation with new table
+      const updatedReservation = { ...reservation };
+      updatedReservation.table_id = table_id;
+      
+      state.reservations[reservation.id] = updatedReservation;
+      
+      res.status(200).json(serializeReservation(updatedReservation));
     } else {
       // No changes requested
       return res.status(200).json(serializeReservation(reservation));
