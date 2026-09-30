@@ -338,6 +338,9 @@ app.post('/_test/reset', (req, res) => {
     }
   }
   
+  // Save tokens to preserve them across reset
+  const savedTokens = state.tokens;
+  
   // Clear current state only after validation passes
   state = {
     users: {},
@@ -345,7 +348,7 @@ app.post('/_test/reset', (req, res) => {
     reservations: {},
     idempotencyKeys: {},
     exportState: null,
-    tokens: {} // Clear tokens so fixture users can log in fresh
+    tokens: savedTokens // Preserve issued tokens
   };
 
   // Load fixture data
@@ -1219,6 +1222,16 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   let changesMade = false;
 
   if (table_id !== undefined) {
+    // Validate table exists in the restaurant
+    const table = restaurant.tables.find(t => t.id === table_id);
+    if (!table) {
+      return res.status(404).json({
+        error: {
+          code: 'not_found',
+          message: 'Table not found'
+        }
+      });
+    }
     updatedReservation.table_id = table_id;
     changesMade = true;
   }
