@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 import { DateTime, IANAZone } from 'luxon';
 import * as fs from 'fs';
+import path from 'path';
 
 // Types and interfaces
 interface User {
@@ -190,6 +191,18 @@ const jsonErrorHandler = (err: any, req: Request, res: Response, next: NextFunct
 };
 
 // Routes
+// Serve HTML pages
+const PUB = path.join(__dirname, '..', 'public');
+const page = (f: string) => (_req: any, res: any) => {
+  const p = path.join(PUB, f);
+  if (!fs.existsSync(p)) return res.status(404).send('not found');
+  res.type('html').send(fs.readFileSync(p, 'utf8'));
+};
+app.get('/', page('index.html'));
+app.get('/login', page('login.html'));
+app.get('/signup', page('signup.html'));
+app.get('/lookup', page('lookup.html'));
+
 // Health endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
