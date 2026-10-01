@@ -221,7 +221,7 @@
         }
         
         // Render availability grid
-        function renderAvailabilityGrid(slots, restaurantId) {
+        async function renderAvailabilityGrid(slots, restaurantId) {
             availabilityGrid.innerHTML = '';
             
             if (!slots || slots.length === 0) {
@@ -229,103 +229,141 @@
                 return;
             }
             
-            // Group slots by time
-            const slotMap = new Map();
-            slots.forEach(slot => {
-                const time = slot.starts_at_local.split('T')[1]; // HH:MM
-                if (!slotMap.has(time)) {
-                    slotMap.set(time, []);
-                }
-                slotMap.get(time).push(slot);
-            });
-            
-            // Render slots
-            slotMap.forEach((timeSlots, time) => {
-                const row = document.createElement('div');
-                row.style.display = 'flex';
-                row.style.marginBottom = '10px';
+            try {
+                // Fetch restaurant details to get all tables
+                const restaurantResponse = await fetch(`/restaurants/${restaurantId}`);
+                const restaurantData = await restaurantResponse.json();
                 
-                // Time label
-                const timeLabel = document.createElement('div');
-                timeLabel.textContent = time;
-                timeLabel.style.width = '80px';
-                timeLabel.style.textAlign = 'right';
-                timeLabel.style.paddingRight = '10px';
-                row.appendChild(timeLabel);
+                // Group slots by time
+                const slotMap = new Map();
+                slots.forEach(slot => {
+                    const time = slot.starts_at_local.split('T')[1]; // HH:MM
+                    if (!slotMap.has(time)) {
+                        slotMap.set(time, []);
+                    }
+                    slotMap.get(time).push(slot);
+                });
                 
-                // Slot cells
-                timeSlots.forEach(slot => {
-                    slot.available_table_ids.forEach(tableId => {
+                // Render slots
+                slotMap.forEach((timeSlots, time) => {
+                    const row = document.createElement('div');
+                    row.style.display = 'flex';
+                    row.style.marginBottom = '10px';
+                    
+                    // Time label
+                    const timeLabel = document.createElement('div');
+                    timeLabel.textContent = time;
+                    timeLabel.style.width = '80px';
+                    timeLabel.style.textAlign = 'right';
+                    timeLabel.style.paddingRight = '10px';
+                    row.appendChild(timeLabel);
+                    
+                    // Get all tables for this restaurant
+                    const allTables = restaurantData.tables || [];
+                    
+                    // Render a cell for every table
+                    allTables.forEach(table => {
+                        const tableId = table.id;
                         const cell = document.createElement('div');
-                        cell.className = 'cell available';
                         cell.dataset.tableId = tableId;
                         cell.dataset.time = time;
-                        cell.dataset.available = 'true';
-                        cell.textContent = tableId;
+                        cell.dataset.testid = `slot-${tableId}-${time}`;
                         
-                        // Add click handler for booking
-                        cell.addEventListener('click', () => {
-                            if (!currentUser) {
-                                // Redirect to login or show auth error
-                                window.location.href = '/login';
-                                return;
+                        // Check if this table is available for this slot
+                        let isAvailable = false;
+                        timeSlots.forEach(slot => {
+                            if (slot.available_table_ids.includes(tableId)) {
+                                isAvailable = true;
                             }
-                            
-                            // Set the selected reservation
-                            currentReservation = {
-                                table_id: tableId,
-                                restaurant_id: restaurantId,
-                                starts_at_local: `${dateInput.value}T${time}`,
-                                party_size: parseInt(partySizeInput.value)
-                            };
-                            
-                            // Show booking form
-                            showBookingForm();
                         });
+                        
+                        cell.dataset.available = isAvailable ? 'true' : 'false';
+                        
+                        if (isAvailable) {
+                            cell.className = 'cell available';
+                            cell.textContent = tableId;
+                            
+                            // Add click handler for booking
+                            cell.addEventListener('click', () => {
+                                if (!currentUser) {
+                                    // Redirect to login or show auth error
+                                    window.location.href = '/login';
+                                    return;
+                                }
+                                
+                                // Set the selected reservation
+                                currentReservation = {
+                                    table_id: tableId,
+                                    restaurant_id: restaurantId,
+                                    starts_at_local: `${dateInput.value}T${time}`,
+                                    party_size: parseInt(partySizeInput.value)
+                                };
+                                
+                                // Show booking form
+                                showBookingForm();
+                            });
+                        } else {
+                            cell.className = 'cell unavailable';
+                            cell.textContent = tableId;
+                            
+                            // Grey style for unavailable cells
+                            cell.style.backgroundColor = '#f8d7da';
+                            
+                            // Click handler that does nothing
+                            cell.addEventListener('click', (e) => {
+                                e.stopPropagation();
+                                // Do nothing for unavailable cells
+                            });
+                        }
                         
                         row.appendChild(cell);
                     });
                     
-                    // Add combination cells if available
-                    if (slot.available_options) {
-                        slot.available_options.forEach(option => {
-                            if (option.table_ids.length > 1) {
-                                const combinationId = option.table_ids.join('+');
-                                const cell = document.createElement('div');
-                                cell.className = 'cell available';
-                                cell.dataset.tableIds = combinationId;
-                                cell.dataset.time = time;
-                                cell.dataset.available = 'true';
-                                cell.textContent = combinationId.replace('+', ' & ');
-                                
-                                // Add click handler for booking
-                                cell.addEventListener('click', () => {
-                                    if (!currentUser) {
-                                        // Redirect to login or show auth error
-                                        window.location.href = '/login';
-                                        return;
-                                    }
+                    // Add combination cells if available (keep as-is)
+                    timeSlots.forEach(slot => {
+                        if (slot.available_options) {
+                            slot.available_options.forEach(option => {
+                                if (option.table_ids.length > 1) {
+                                    const combinationId = option.table_ids.join('+');
+                                    const cell = document.createElement('div');
+                                    cell.className = 'cell available';
+                                    cell.dataset.tableIds = combinationId;
+                                    cell.dataset.time = time;
+                                    cell.dataset.available = 'true';
+                                    cell.textContent = combinationId.replace('+', ' & ');
                                     
-                                    // Set the selected reservation
-                                    currentReservation = {
-                                        table_ids: option.table_ids,
-                                        restaurant_id: restaurantId,
-                                        starts_at_local: `${dateInput.value}T${time}`,
-                                        party_size: parseInt(partySizeInput.value)
-                                    };
+                                    // Add click handler for booking
+                                    cell.addEventListener('click', () => {
+                                        if (!currentUser) {
+                                            // Redirect to login or show auth error
+                                            window.location.href = '/login';
+                                            return;
+                                        }
+                                        
+                                        // Set the selected reservation
+                                        currentReservation = {
+                                            table_ids: option.table_ids,
+                                            restaurant_id: restaurantId,
+                                            starts_at_local: `${dateInput.value}T${time}`,
+                                            party_size: parseInt(partySizeInput.value)
+                                        };
+                                        
+                                        // Show booking form
+                                        showBookingForm();
+                                    });
                                     
-                                    // Show booking form
-                                    showBookingForm();
-                                });
-                                
-                                row.appendChild(cell);
-                            }
-                        });
-                    }
+                                    row.appendChild(cell);
+                                }
+                            });
+                        }
+                    });
+                    
+                    availabilityGrid.appendChild(row);
                 });
-                
-                availabilityGrid.appendChild(row);
-            });
+            } catch (error) {
+                console.error('Error rendering availability grid:', error);
+                availabilityGrid.innerHTML = '<div class="error">Error loading availability data</div>';
+            }
         }
         
         // Show booking form
