@@ -600,6 +600,15 @@ app.post('/auth/login', (req, res) => {
   });
 });
 
+// Validate auth endpoint
+app.get('/auth/validate', (req: any, res: any) => {
+  const tok = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const uid = state.tokens[tok];
+  const user = uid && state.users[uid];
+  if (!user) return res.status(401).json({ error: { code: 'unauthenticated', message: 'Invalid token' } });
+  res.status(200).json({ user_id: user.id, display_name: user.display_name });
+});
+
 // Public endpoints
 app.get('/restaurants', (req, res) => {
   const restaurants = Object.values(state.restaurants).map(r => ({
