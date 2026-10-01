@@ -41,6 +41,9 @@
         const loginSubmit = document.getElementById('login-submit');
         const authError = document.getElementById('auth-error');
         
+        // Remove auth-error element that should be dynamically inserted
+        if (authError.parentNode) authError.remove();
+        
         // Setup event listeners
         loginSubmit.addEventListener('click', login);
         
@@ -50,6 +53,10 @@
             const password = loginPassword.value;
             
             if (!email || !password) {
+                // Insert error if not already present
+                if (!authError.parentNode) {
+                    document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                }
                 authError.textContent = 'Please fill in all fields';
                 authError.style.display = 'block';
                 return;
@@ -72,11 +79,19 @@
                     // Redirect to home
                     window.location.href = '/';
                 } else {
+                    // Insert error if not already present
+                    if (!authError.parentNode) {
+                        document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                    }
                     authError.textContent = data.error?.message || 'Login failed';
                     authError.style.display = 'block';
                 }
             } catch (error) {
                 console.error('Error logging in:', error);
+                // Insert error if not already present
+                if (!authError.parentNode) {
+                    document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                }
                 authError.textContent = 'Network error during login';
                 authError.style.display = 'block';
             }

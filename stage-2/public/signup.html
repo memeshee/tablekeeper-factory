@@ -47,6 +47,9 @@
         const signupSubmit = document.getElementById('signup-submit');
         const authError = document.getElementById('auth-error');
         
+        // Remove auth-error element that should be dynamically inserted
+        if (authError.parentNode) authError.remove();
+        
         // Setup event listeners
         signupSubmit.addEventListener('click', signup);
         
@@ -57,12 +60,20 @@
             const password = signupPassword.value;
             
             if (!email || !displayName || !password) {
+                // Insert error if not already present
+                if (!authError.parentNode) {
+                    document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                }
                 authError.textContent = 'Please fill in all fields';
                 authError.style.display = 'block';
                 return;
             }
             
             if (password.length < 8) {
+                // Insert error if not already present
+                if (!authError.parentNode) {
+                    document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                }
                 authError.textContent = 'Password must be at least 8 characters';
                 authError.style.display = 'block';
                 return;
@@ -85,11 +96,19 @@
                     // Redirect to home
                     window.location.href = '/';
                 } else {
+                    // Insert error if not already present
+                    if (!authError.parentNode) {
+                        document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                    }
                     authError.textContent = data.error?.message || 'Signup failed';
                     authError.style.display = 'block';
                 }
             } catch (error) {
                 console.error('Error signing up:', error);
+                // Insert error if not already present
+                if (!authError.parentNode) {
+                    document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                }
                 authError.textContent = 'Network error during signup';
                 authError.style.display = 'block';
             }

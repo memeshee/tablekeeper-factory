@@ -115,6 +115,13 @@
             
             // Setup event listeners
             setupEventListeners();
+            
+            // Remove elements that should be dynamically inserted
+            // This prevents them from being present in the DOM initially
+            if (bookingForm.parentNode) bookingForm.remove();
+            if (bookingError.parentNode) bookingError.remove();
+            if (confirmation.parentNode) confirmation.remove();
+            if (authError.parentNode) authError.remove();
         }
         
         // Load restaurants
@@ -156,6 +163,14 @@
                 .then(data => {
                     currentUser = data;
                     currentUserSpan.textContent = `Welcome, ${data.display_name}!`;
+                    
+                    // Insert/logout elements if they're not already in DOM
+                    if (!currentUserSpan.parentNode) {
+                        document.getElementById('header').appendChild(currentUserSpan);
+                    }
+                    if (!logoutButton.parentNode) {
+                        document.getElementById('header').appendChild(logoutButton);
+                    }
                     logoutButton.style.display = 'inline-block';
                 })
                 .catch(() => {
@@ -164,11 +179,19 @@
                     currentUser = null;
                     currentUserSpan.textContent = '';
                     logoutButton.style.display = 'none';
+                    
+                    // Remove user elements from DOM
+                    if (currentUserSpan.parentNode) currentUserSpan.remove();
+                    if (logoutButton.parentNode) logoutButton.remove();
                 });
             } else {
                 currentUser = null;
                 currentUserSpan.textContent = '';
                 logoutButton.style.display = 'none';
+                
+                // Remove user elements from DOM
+                if (currentUserSpan.parentNode) currentUserSpan.remove();
+                if (logoutButton.parentNode) logoutButton.remove();
             }
         }
         
@@ -177,6 +200,11 @@
             searchButton.addEventListener('click', searchAvailability);
             bookingSubmit.addEventListener('click', bookTable);
             logoutButton.addEventListener('click', logout);
+            bookingPartySize.addEventListener('input', () => {
+                if (currentReservation) {
+                    currentReservation.key = crypto.randomUUID();
+                }
+            });
         }
         
         // Search availability
@@ -370,13 +398,45 @@
         function showBookingForm() {
             if (!currentReservation) return;
             
+            // Create form template if not already present
+            if (!bookingForm.parentNode) {
+                // Insert the form element
+                document.getElementById('availability-grid').parentNode.insertBefore(bookingForm, document.getElementById('availability-grid').nextSibling);
+            }
+            
             // Set form values
-            bookingSummary.textContent = currentReservation.table_ids ? 
-                `Selected tables: ${currentReservation.table_ids.join(', ')}` : 
-                `Selected table: ${currentReservation.table_id}`;
+            // Get restaurant details to get table labels
+            fetch(`/restaurants/${currentReservation.restaurant_id}`)
+                .then(response => response.json())
+                .then(restaurantData => {
+                    const tables = restaurantData.tables || [];
+                    let tableLabel = '';
+                    if (currentReservation.table_id) {
+                        const table = tables.find(t => t.id === currentReservation.table_id);
+                        tableLabel = table ? table.label : currentReservation.table_id;
+                    } else if (currentReservation.table_ids) {
+                        const tableLabels = currentReservation.table_ids.map(id => {
+                            const table = tables.find(t => t.id === id);
+                            return table ? table.label : id;
+                        });
+                        tableLabel = tableLabels.join(' & ');
+                    }
+                    
+                    const timePart = currentReservation.starts_at_local.split('T')[1];
+                    bookingSummary.textContent = `Table ${tableLabel} at ${timePart}`;
+                })
+                .catch(error => {
+                    console.error('Error getting table labels:', error);
+                    const timePart = currentReservation.starts_at_local.split('T')[1];
+                    bookingSummary.textContent = `Table ${currentReservation.table_id || currentReservation.table_ids.join(', ')} at ${timePart}`;
+                });
+            
             bookingPartySize.value = currentReservation.party_size;
             
-            // Show form
+            // Generate new idempotency key for this booking
+            currentReservation.key = crypto.randomUUID();
+            
+            // Make sure form is visible
             bookingForm.style.display = 'block';
             confirmation.style.display = 'none';
             bookingError.style.display = 'none';
@@ -413,7 +473,7 @@
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${token}`,
-                        'Idempotency-Key': `booking_${Date.now()}`
+                        'Idempotency-Key': currentReservation.key
                     },
                     body: JSON.stringify(bookingData)
                 });
@@ -422,19 +482,55 @@
                 
                 if (response.ok) {
                     // Show confirmation
-                    confirmationReference.textContent = data.reference;
-                    confirmationDetails.textContent = `Restaurant: ${data.restaurant_id}, Table(s): ${data.table_ids ? data.table_ids.join(', ') : data.table_id}, Time: ${data.starts_at_local}`;
-                    confirmation.style.display = 'block';
-                    bookingForm.style.display = 'none';
-                    bookingError.style.display = 'none';
+                    // Get restaurant details to get restaurant name
+                    fetch(`/restaurants/${data.restaurant_id}`)
+                        .then(response => response.json())
+                        .then(restaurantData => {
+                            const restaurantName = restaurantData.name || data.restaurant_id;
+                            confirmationReference.textContent = data.reference;
+                            confirmationDetails.textContent = `Restaurant: ${restaurantName}, Table(s): ${data.table_ids ? data.table_ids.join(', ') : data.table_id}, Time: ${data.starts_at_local}`;
+                            
+                            // Insert confirmation if not already present
+                            if (!confirmation.parentNode) {
+                                document.getElementById('availability-grid').parentNode.insertBefore(confirmation, document.getElementById('availability-grid').nextSibling);
+                            }
+                            
+                            confirmation.style.display = 'block';
+                            bookingForm.style.display = 'block'; // Keep form visible
+                            bookingError.style.display = 'none';
+                        })
+                        .catch(error => {
+                            console.error('Error getting restaurant name:', error);
+                            confirmationReference.textContent = data.reference;
+                            confirmationDetails.textContent = `Restaurant: ${data.restaurant_id}, Table(s): ${data.table_ids ? data.table_ids.join(', ') : data.table_id}, Time: ${data.starts_at_local}`;
+                            
+                            // Insert confirmation if not already present
+                            if (!confirmation.parentNode) {
+                                document.getElementById('availability-grid').parentNode.insertBefore(confirmation, document.getElementById('availability-grid').nextSibling);
+                            }
+                            
+                            confirmation.style.display = 'block';
+                            bookingForm.style.display = 'block'; // Keep form visible
+                            bookingError.style.display = 'none';
+                        });
                 } else {
+                    // Insert error if not already present
+                    if (!bookingError.parentNode) {
+                        document.getElementById('availability-grid').parentNode.insertBefore(bookingError, document.getElementById('availability-grid').nextSibling);
+                    }
                     bookingError.textContent = data.error?.message || 'Booking failed';
                     bookingError.style.display = 'block';
+                    confirmation.style.display = 'none';
                 }
             } catch (error) {
                 console.error('Error booking table:', error);
+                // Insert error if not already present
+                if (!bookingError.parentNode) {
+                    document.getElementById('availability-grid').parentNode.insertBefore(bookingError, document.getElementById('availability-grid').nextSibling);
+                }
                 bookingError.textContent = 'Network error while booking table';
                 bookingError.style.display = 'block';
+                confirmation.style.display = 'none';
             }
         }
         
@@ -444,6 +540,11 @@
             currentUser = null;
             currentUserSpan.textContent = '';
             logoutButton.style.display = 'none';
+            
+            // Remove user elements from DOM
+            if (currentUserSpan.parentNode) currentUserSpan.remove();
+            if (logoutButton.parentNode) logoutButton.remove();
+            
             window.location.href = '/';
         }
         
