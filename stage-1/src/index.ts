@@ -1221,6 +1221,15 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   let changesMade = false;
 
   if (table_id !== undefined) {
+    const newTable = restaurant.tables.find(t => t.id === table_id);
+    if (!newTable) {
+      return res.status(404).json({
+        error: {
+          code: 'not_found',
+          message: 'Table not found'
+        }
+      });
+    }
     updatedReservation.table_id = table_id;
     changesMade = true;
   }
