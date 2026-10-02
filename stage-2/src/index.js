@@ -398,7 +398,8 @@ app.get('/_test/export', (req, res) => {
             restaurants: state.restaurants,
             reservations: state.reservations,
             idempotencyKeys: state.idempotencyKeys,
-            exportState: state.exportState
+            exportState: state.exportState,
+            tokens: state.tokens
         }
     });
 });
@@ -413,15 +414,13 @@ app.post('/_test/import', (req, res) => {
             }
         });
     }
-    // Snapshot tokens before replacing state (same pattern as reset handler)
-    const savedTokens = state.tokens;
-    // Replace state
+    // Replace state (import restores the exported state, including tokens)
     state.users = importedState.users || {};
     state.restaurants = importedState.restaurants || {};
     state.reservations = importedState.reservations || {};
     state.idempotencyKeys = importedState.idempotencyKeys || {};
     state.exportState = importedState.exportState || null;
-    state.tokens = savedTokens;
+    state.tokens = importedState.tokens || {};
     res.status(204).send();
 });
 // Authentication endpoints

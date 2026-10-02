@@ -423,7 +423,8 @@ app.get('/_test/export', (req, res) => {
       restaurants: state.restaurants,
       reservations: state.reservations,
       idempotencyKeys: state.idempotencyKeys,
-      exportState: state.exportState
+      exportState: state.exportState,
+      tokens: state.tokens
     }
   });
 });
@@ -447,6 +448,7 @@ app.post('/_test/import', (req, res) => {
   state.reservations = importedState.reservations || {};
   state.idempotencyKeys = importedState.idempotencyKeys || {};
   state.exportState = importedState.exportState || null;
+  state.tokens = importedState.tokens || {};
 
   res.status(204).send();
 });
