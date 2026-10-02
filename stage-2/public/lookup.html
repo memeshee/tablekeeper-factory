@@ -98,7 +98,7 @@
                 
                 if (response.ok) {
                     // Display reservation details
-                    reservationStatus.textContent = `Status: ${data.status}`;
+                    reservationStatus.textContent = data.status;
                     reservationTables.textContent = `Tables: ${data.table_ids ? data.table_ids.join(', ') : data.table_id}`;
                     reservationTime.textContent = `Time: ${data.starts_at_local}`;
                     
@@ -161,7 +161,7 @@
                 
                 if (response.ok) {
                     // Update UI to show cancelled status
-                    reservationStatus.textContent = `Status: ${data.status}`;
+                    reservationStatus.textContent = data.status;
                     reservationCancelButton.style.display = 'none';
                     reservationError.style.display = 'none';
                     
