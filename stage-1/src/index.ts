@@ -1041,7 +1041,7 @@ const closesAt = DateTime.fromObject({
     ends_at: endsAt.toISO({ suppressMilliseconds: true }),
     party_size,
     status: 'confirmed',
-    created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true })
+    created_at: reservation.created_at
   };
 
   // Cache idempotency key with the exact response
