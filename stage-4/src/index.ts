@@ -71,7 +71,7 @@ interface HistoryChange {
 interface HistoryEntry {
   seq: number;
   at: string;
-  event: 'created' | 'changed' | 'cancelled';
+  event: 'created' | 'changed' | 'cancelled' | 'reassigned';
   revision: number;
   accepted_terms: AcceptedTerms;
   changes: HistoryChange[];
@@ -2056,75 +2056,93 @@ const planSeating = (
     }
   }
 
-  const feasibleFor = (reservation: Reservation, tableIds: string[]): boolean => {
-    const start = DateTime.fromISO(reservation.starts_at);
-    const end = DateTime.fromISO(reservation.ends_at);
-    if (tableSetCapacity(reservation.accepted_terms, tableIds) < reservation.party_size) return false;
-    return isTableSetAvailableForPlan(restaurant, tableIds, start, end, fixed, new Map());
+  const currentAssignment = new Map(considered.map(r => [r.reference, getTableSet(r)] as [string, string[]]));
+
+  // Per-booking feasible options: capacity under its OWN accepted terms,
+  // and free of fixed bookings + applied closures + the proposed closure
+  // (conflicts BETWEEN considered bookings are resolved by the joint search below).
+  const perBooking: { reservation: Reservation; current: string[]; feasible: { tableIds: string[]; capacity: number; rank: number }[] }[] =
+    considered.map(r => {
+      const current = getTableSet(r);
+      const feasible = options
+        .filter(o => tableSetCapacity(r.accepted_terms, o.tableIds) >= r.party_size)
+        .filter(o => {
+          const start = DateTime.fromISO(r.starts_at);
+          const end = DateTime.fromISO(r.ends_at);
+          return isTableSetAvailableForPlan(restaurant, o.tableIds, start, end, fixed, new Map(), [closure]);
+        })
+        .map(o => ({
+          tableIds: o.tableIds,
+          capacity: tableSetCapacity(r.accepted_terms, o.tableIds),
+          rank: o.rank
+        }));
+      return { reservation: r, current, feasible };
+    });
+  if (perBooking.some(b => b.feasible.length === 0)) return null;
+
+  // Joint feasibility of a full assignment: no two considered bookings share a
+  // table over overlapping intervals (fixed/closures already filtered above).
+  const jointlyFeasible = (assign: Map<string, string[]>): boolean => {
+    for (const b of perBooking) {
+      const start = DateTime.fromISO(b.reservation.starts_at);
+      const end = DateTime.fromISO(b.reservation.ends_at);
+      const mine = assign.get(b.reservation.reference)!;
+      for (const other of perBooking) {
+        if (other.reservation.reference === b.reservation.reference) continue;
+        const theirs = assign.get(other.reservation.reference)!;
+        if (!mine.some(t => theirs.includes(t))) continue;
+        const oStart = DateTime.fromISO(other.reservation.starts_at);
+        const oEnd = DateTime.fromISO(other.reservation.ends_at);
+        if (!(end <= oStart || start >= oEnd)) return false;
+      }
+    }
+    return true;
   };
 
-  const currentAssignment = new Map(considered.map(r => [r.reference, getTableSet(r)]));
-  const feasibleCurrent = considered.every(r => feasibleFor(r, currentAssignment.get(r.reference)!));
-  if (feasibleCurrent) {
-    const unused = considered.reduce((sum, r) => {
-      return sum + (tableSetCapacity(r.accepted_terms, currentAssignment.get(r.reference)!) - r.party_size);
-    }, 0);
-    return {
-      assignments: consideredRefs.map(ref => ({
-        reference: ref,
-        table_ids: currentAssignment.get(ref)!,
-        changed: false
-      })),
-      moved_count: 0,
-      unused_seats: unused
-    };
-  }
-
-  const candidates = considered.map(r => {
-    const current = currentAssignment.get(r.reference)!;
-    const currentRank = optionRank(restaurant, current);
-    const feasibleOptions = options.filter(o => feasibleFor(r, o.tableIds));
-    if (feasibleOptions.length === 0) return null;
-    feasibleOptions.sort((a, b) => {
-      if (a.capacity - r.party_size !== b.capacity - r.party_size) {
-        return (a.capacity - r.party_size) - (b.capacity - r.party_size);
+  // Exhaustive search (<=6 bookings, <=10 options each): minimize in order
+  // 1. moved count, 2. total unused seats, 3. rank vector in ascending ref order.
+  const byRef = [...perBooking].sort((a, b) =>
+    a.reservation.reference < b.reservation.reference ? -1 : 1);
+  let best: { assign: Map<string, string[]>; moved: number; unused: number; ranks: number[] } | null = null;
+  const better = (moved: number, unused: number, ranks: number[]): boolean => {
+    if (!best) return true;
+    if (moved !== best.moved) return moved < best.moved;
+    if (unused !== best.unused) return unused < best.unused;
+    for (let i = 0; i < ranks.length; i++) {
+      if (ranks[i] !== best.ranks[i]) return ranks[i] < best.ranks[i];
+    }
+    return false;
+  };
+  const assign = new Map<string, string[]>();
+  const search = (i: number, moved: number, unused: number, ranks: number[]): void => {
+    if (best && (moved > best.moved || (moved === best.moved && unused > best.unused))) return;
+    if (i === byRef.length) {
+      if (jointlyFeasible(assign) && better(moved, unused, ranks)) {
+        best = { assign: new Map(assign), moved, unused, ranks: [...ranks] };
       }
-      return a.rank - b.rank;
-    });
-    const best = feasibleOptions[0];
-    const changed = !isTableSetEqual(best.tableIds, current);
-    return {
-      reservation: r,
-      tableIds: best.tableIds,
-      unused: best.capacity - r.party_size,
-      changed,
-      rank: best.rank,
-      currentRank
-    };
-  });
-  if (candidates.some(c => c === null)) return null;
+      return;
+    }
+    const b = byRef[i];
+    for (const o of b.feasible) {
+      assign.set(b.reservation.reference, o.tableIds);
+      search(i + 1,
+        moved + (isTableSetEqual(o.tableIds, b.current) ? 0 : 1),
+        unused + (o.capacity - b.reservation.party_size),
+        [...ranks, o.rank]);
+      assign.delete(b.reservation.reference);
+    }
+  };
+  search(0, 0, 0, []);
+  if (!best) return null;
 
-  const assigned = new Map<string, string[]>();
-  for (const c of candidates) {
-    assigned.set(c.reservation.reference, c.tableIds);
-  }
-  const conflict = considered.some((r, i) => {
-    const start = DateTime.fromISO(r.starts_at);
-    const end = DateTime.fromISO(r.ends_at);
-    return !isTableSetAvailableForPlan(restaurant, candidates[i].tableIds, start, end, fixed, assigned);
-  });
-  if (conflict) return null;
-
-  const moved_count = candidates.filter(c => c.changed).length;
-  const unused_seats = candidates.reduce((sum, c) => sum + c.unused, 0);
+  const finalBest = best;
+  const moved_count = finalBest.moved;
+  const unused_seats = finalBest.unused;
   return {
     assignments: consideredRefs.map(ref => {
-      const c = candidates.find(x => x.reservation.reference === ref)!;
-      return {
-        reference: ref,
-        table_ids: c.tableIds,
-        changed: c.changed
-      };
+      const table_ids = finalBest.assign.get(ref)!;
+      const cur = currentAssignment.get(ref)!;
+      return { reference: ref, table_ids, changed: !isTableSetEqual(table_ids, cur) };
     }),
     moved_count,
     unused_seats
@@ -2364,7 +2382,7 @@ app.post('/restaurants/:id/replans/:plan_id/apply', authenticate, (req, res) => 
     reservation.table_id = assignment.table_ids[0];
     reservation.table_ids = assignment.table_ids;
     reservation.revision += 1;
-    appendHistory(reservation, 'changed', [
+    appendHistory(reservation, 'reassigned', [
       { field: 'table_ids', from: currentTables, to: assignment.table_ids },
       { field: 'plan_id', from: null, to: plan.id }
     ]);
