@@ -95,6 +95,16 @@ interface Reservation {
   history: HistoryEntry[];
 }
 
+interface Series {
+  id: string;
+  owner: string;
+  restaurant_id: string;
+  revision: number;
+  interval_weeks: number;
+  occurrences: string[]; // reservation references in index order
+  exceptions: Record<string, boolean>; // reference -> exception flag
+}
+
 interface Fixture {
   users: User[];
   restaurants: Restaurant[];
@@ -112,6 +122,9 @@ let state: {
   policies: Record<string, Policy[]>; // restaurant_id -> published policies in publication order
   nextPolicyVersion: Record<string, number>; // restaurant_id -> next version to allocate
   history: Record<string, HistoryEntry[]>; // reservation_id -> history entries
+  series: Record<string, Series>; // series_id -> series
+  seriesByReservation: Record<string, string>; // reservation reference -> series_id
+  restaurantRevisions: Record<string, number>; // restaurant_id -> revision counter
 } = {
   users: {},
   restaurants: {},
@@ -121,7 +134,10 @@ let state: {
   tokens: {},
   policies: {},
   nextPolicyVersion: {},
-  history: {}
+  history: {},
+  series: {},
+  seriesByReservation: {},
+  restaurantRevisions: {}
 };
 
 // Append a history entry to a reservation (seq continues from the last entry)
@@ -496,7 +512,10 @@ app.post('/_test/reset', (req, res) => {
     tokens: savedTokens, // Preserve issued tokens
     policies: {},
     nextPolicyVersion: {},
-    history: {}
+    history: {},
+    series: {},
+    seriesByReservation: {},
+    restaurantRevisions: {}
   };
 
   // Load fixture data
@@ -521,6 +540,7 @@ app.post('/_test/reset', (req, res) => {
     state.restaurants[restaurant.id] = restaurant;
     state.policies[restaurant.id] = [];
     state.nextPolicyVersion[restaurant.id] = 1;
+    state.restaurantRevisions[restaurant.id] = 0;
   });
 
 fixture.reservations.forEach(reservation => {
@@ -596,7 +616,10 @@ app.get('/_test/export', (req, res) => {
       tokens: state.tokens,
       policies: state.policies,
       nextPolicyVersion: state.nextPolicyVersion,
-      history: state.history
+      history: state.history,
+      series: state.series,
+      seriesByReservation: state.seriesByReservation,
+      restaurantRevisions: state.restaurantRevisions
     }
   });
 });
@@ -624,6 +647,9 @@ app.post('/_test/import', (req, res) => {
   state.policies = importedState.policies || {};
   state.nextPolicyVersion = importedState.nextPolicyVersion || {};
   state.history = importedState.history || {};
+  state.series = importedState.series || {};
+  state.seriesByReservation = importedState.seriesByReservation || {};
+  state.restaurantRevisions = importedState.restaurantRevisions || {};
 
   res.status(204).send();
 });
@@ -1513,6 +1539,9 @@ const closesAt = DateTime.fromObject({
   createdChanges.push({ field: 'party_size', from: null, to: party_size });
   appendHistory(reservation, 'created', createdChanges);
 
+  // Bump the restaurant revision once for this booking
+  state.restaurantRevisions[restaurant_id] = (state.restaurantRevisions[restaurant_id] || 0) + 1;
+
   // Prepare the exact response that will be sent
   const responseToSend = serializeReservation(reservation);
 
@@ -1524,6 +1553,327 @@ const closesAt = DateTime.fromObject({
   };
 
   res.status(201).json(serializeReservation(reservation));
+});
+
+// Create a recurring series from an existing reservation (occurrence zero).
+// Atomic: on any failure nothing is created and no idempotency claim is kept.
+app.post('/series', authenticate, (req, res) => {
+  const userId = (req as any).user.id;
+  const { anchor_reference, count, interval_weeks } = req.body;
+
+  // Validate body fields
+  if (typeof anchor_reference !== 'string' || !anchor_reference) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'anchor_reference is required'
+      }
+    });
+  }
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 2 || count > 12) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'count must be an integer 2..12'
+      }
+    });
+  }
+  if (typeof interval_weeks !== 'number' || !Number.isInteger(interval_weeks) ||
+      interval_weeks < 1 || interval_weeks > 4) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'interval_weeks must be an integer 1..4'
+      }
+    });
+  }
+
+  // Idempotency key (stage-1 replay rules)
+  const idempotencyKey = req.headers['idempotency-key'] as string;
+  if (!idempotencyKey) {
+    return res.status(400).json({
+      error: {
+        code: 'missing_idempotency_key',
+        message: 'Idempotency key is required'
+      }
+    });
+  }
+  const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
+  if (keyEntry) {
+    if (JSON.stringify(req.body) === keyEntry.body) {
+      return res.status(200).json(keyEntry.response);
+    }
+    return res.status(409).json({
+      error: {
+        code: 'idempotency_key_reuse',
+        message: 'Idempotency key already used with different request body'
+      }
+    });
+  }
+
+  // Resolve the anchor
+  const anchor = getReservationByReference(anchor_reference);
+  if (!anchor || anchor.user_id !== userId) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Reservation not found'
+      }
+    });
+  }
+  if (anchor.status === 'cancelled') {
+    return res.status(409).json({
+      error: {
+        code: 'reservation_cancelled',
+        message: 'Anchor is cancelled'
+      }
+    });
+  }
+  if (state.seriesByReservation[anchor.reference]) {
+    return res.status(409).json({
+      error: {
+        code: 'already_in_series',
+        message: 'Anchor is already part of a series'
+      }
+    });
+  }
+
+  // Anchor must satisfy its accepted cancellation cutoff
+  const anchorStart = DateTime.fromISO(anchor.starts_at);
+  const timeUntilAnchorStart = anchorStart.diff(DateTime.now(), 'minutes').minutes;
+  if (timeUntilAnchorStart <= anchor.accepted_terms.cancellation_cutoff_minutes) {
+    return res.status(409).json({
+      error: {
+        code: 'cutoff_passed',
+        message: 'Anchor cancellation deadline passed'
+      }
+    });
+  }
+
+  const restaurant = getRestaurantById(anchor.restaurant_id);
+  if (!restaurant) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Restaurant not found'
+      }
+    });
+  }
+
+  const anchorTableSet: string[] = anchor.table_ids && anchor.table_ids.length > 0
+    ? anchor.table_ids
+    : [anchor.table_id];
+
+  // Build the series atomically. On any failure, roll back everything.
+  const newReservations: Reservation[] = [];
+  const newHistory: Record<string, HistoryEntry[]> = {};
+  const newSeriesByReservation: Record<string, string> = {};
+  const seriesId = `series_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+
+  try {
+    const occurrences: { index: number; reference: string; exception: boolean; reservation: any }[] = [];
+
+    // Occurrence 0: the anchor itself, unchanged
+    occurrences.push({
+      index: 0,
+      reference: anchor.reference,
+      exception: false,
+      reservation: serializeReservation(anchor)
+    });
+    newSeriesByReservation[anchor.reference] = seriesId;
+
+    // Occurrences 1..count-1
+    for (let i = 1; i < count; i++) {
+      const targetDate = anchorStart.plus({ days: i * interval_weeks * 7 });
+      const startsAtLocal = targetDate.toFormat('yyyy-MM-dd\'T\'HH:mm');
+      const startsAt = DateTime.fromISO(startsAtLocal, { zone: restaurant.timezone });
+      if (!startsAt.isValid) {
+        throw { status: 422, code: 'invalid_local_time', message: 'Invalid local time' };
+      }
+
+      const localDate = startsAt.toFormat('yyyy-MM-dd');
+      const policy = selectPolicy(restaurant, localDate);
+
+      // Capacity check
+      const combinedCapacity = anchorTableSet.reduce((sum, id) => sum + (policy.capacities[id] ?? 0), 0);
+      if (anchor.party_size > combinedCapacity) {
+        throw { status: 422, code: 'party_exceeds_capacity', message: 'Party size exceeds table capacity' };
+      }
+
+      // Slot grid check
+      const startMinutes = startsAt.hour * 60 + startsAt.minute;
+      if (startMinutes % policy.slot_minutes !== 0) {
+        throw { status: 422, code: 'not_on_slot_grid', message: 'Start time is not on slot grid' };
+      }
+
+      // Opening hours check
+      const weekday = startsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][startsAt.weekday - 1];
+      const openingHour = policy.opening_hours.find(h => h.weekday === weekday);
+      if (!openingHour) {
+        throw { status: 422, code: 'outside_opening_hours', message: 'Reservation outside opening hours' };
+      }
+      const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
+      const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
+      const opensAt = DateTime.fromObject({
+        year: startsAt.year, month: startsAt.month, day: startsAt.day,
+        hour: openHour, minute: openMinute
+      }, { zone: restaurant.timezone });
+      const closesAt = DateTime.fromObject({
+        year: startsAt.year, month: startsAt.month, day: startsAt.day,
+        hour: closeHour, minute: closeMinute
+      }, { zone: restaurant.timezone });
+      if (startsAt < opensAt || startsAt >= closesAt) {
+        throw { status: 422, code: 'outside_opening_hours', message: 'Reservation outside opening hours' };
+      }
+      const endsAt = startsAt.plus({ minutes: policy.reservation_duration_minutes });
+      if (endsAt > closesAt) {
+        throw { status: 422, code: 'outside_opening_hours', message: 'Reservation would end after closing' };
+      }
+
+      // Occupancy check (against all confirmed reservations, including ones created earlier in this loop)
+      const allReservations = [...Object.values(state.reservations), ...newReservations];
+      const conflict = allReservations.find(res => {
+        if (res.status !== 'confirmed') return false;
+        return anchorTableSet.some(tableId => reservationOccupiesTable(res, tableId, startsAt, endsAt));
+      });
+      if (conflict) {
+        throw { status: 409, code: 'table_unavailable', message: 'Table is not available at the requested time' };
+      }
+
+      const reservationId = `res_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+      const reference = generateReference();
+      const reservation: Reservation = {
+        id: reservationId,
+        reference,
+        user_id: userId,
+        restaurant_id: restaurant.id,
+        table_id: anchorTableSet[0],
+        table_ids: anchorTableSet,
+        starts_at_local: startsAtLocal,
+        starts_at: startsAt.toISO({ suppressMilliseconds: true }),
+        ends_at: endsAt.toISO({ suppressMilliseconds: true }),
+        party_size: anchor.party_size,
+        status: 'confirmed',
+        created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true }),
+        revision: 1,
+        accepted_terms: policy,
+        history: []
+      };
+      newReservations.push(reservation);
+      newSeriesByReservation[reference] = seriesId;
+
+      const createdChanges: HistoryChange[] = [];
+      if (anchorTableSet.length === 1) {
+        createdChanges.push({ field: 'table_id', from: null, to: anchorTableSet[0] });
+      } else {
+        createdChanges.push({ field: 'table_ids', from: null, to: anchorTableSet });
+      }
+      createdChanges.push({ field: 'starts_at_local', from: null, to: startsAtLocal });
+      createdChanges.push({ field: 'party_size', from: null, to: anchor.party_size });
+      newHistory[reservationId] = [{
+        seq: 1,
+        at: reservation.created_at,
+        event: 'created',
+        revision: 1,
+        accepted_terms: policy,
+        changes: createdChanges
+      }];
+
+      occurrences.push({
+        index: i,
+        reference,
+        exception: false,
+        reservation: serializeReservation(reservation)
+      });
+    }
+
+    // Commit atomically
+    for (const r of newReservations) {
+      state.reservations[r.id] = r;
+    }
+    for (const [id, entries] of Object.entries(newHistory)) {
+      state.history[id] = entries;
+    }
+    const series: Series = {
+      id: seriesId,
+      owner: userId,
+      restaurant_id: restaurant.id,
+      revision: 1,
+      interval_weeks,
+      occurrences: occurrences.map(o => o.reference),
+      exceptions: {}
+    };
+    for (const ref of series.occurrences) {
+      state.seriesByReservation[ref] = seriesId;
+    }
+    state.series[seriesId] = series;
+    state.restaurantRevisions[restaurant.id] = (state.restaurantRevisions[restaurant.id] || 0) + 1;
+
+    const response = {
+      series_id: seriesId,
+      revision: 1,
+      interval_weeks,
+      occurrences
+    };
+    state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
+      userId,
+      body: JSON.stringify(req.body),
+      response
+    };
+
+    res.status(201).json(response);
+  } catch (err: any) {
+    // Rollback: nothing was committed yet, so just return the error
+    const status = err?.status || 500;
+    const code = err?.code || 'internal_error';
+    const message = err?.message || 'Internal server error';
+    res.status(status).json({ error: { code, message } });
+  }
+});
+
+// Get a series with current reservation states. Owner-only; 404 otherwise.
+app.get('/series/:series_id', (req, res) => {
+  const series = state.series[req.params.series_id];
+  if (!series) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Series not found'
+      }
+    });
+  }
+
+  const authHeader = req.headers.authorization;
+  let userId: string | null = null;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    userId = state.tokens[token] || null;
+  }
+  if (userId !== series.owner) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Series not found'
+      }
+    });
+  }
+
+  const occurrences = series.occurrences.map((reference, index) => {
+    const reservation = getReservationByReference(reference);
+    return {
+      index,
+      reference,
+      exception: series.exceptions[reference] === true,
+      reservation: reservation ? serializeReservation(reservation) : null
+    };
+  });
+
+  res.status(200).json({
+    series_id: series.id,
+    revision: series.revision,
+    interval_weeks: series.interval_weeks,
+    occurrences
+  });
 });
 
 app.get('/reservations', authenticate, (req, res) => {
@@ -1695,7 +2045,16 @@ app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
   reservation.status = 'cancelled';
   reservation.revision += 1;
   appendHistory(reservation, 'cancelled', []);
-  
+
+  // If this reservation is part of a series, bump the series revision once
+  const seriesId = state.seriesByReservation[reservation.reference];
+  if (seriesId) {
+    const series = state.series[seriesId];
+    if (series) {
+      series.revision += 1;
+    }
+  }
+
   res.status(200).json(serializeReservation(reservation));
 });
 
@@ -2010,6 +2369,17 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
   reservation.accepted_terms = policy;
   reservation.revision += 1;
   appendHistory(reservation, 'changed', changes);
+
+  // A real individual PATCH on a series occurrence permanently marks it as
+  // an exception and increments the series revision once
+  const seriesId = state.seriesByReservation[reservation.reference];
+  if (seriesId) {
+    const series = state.series[seriesId];
+    if (series) {
+      series.exceptions[reservation.reference] = true;
+      series.revision += 1;
+    }
+  }
 
   res.status(200).json(serializeReservation(reservation));
 });
