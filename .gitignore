@@ -4,3 +4,5 @@ checks/
 dist/
 *.d.ts
 *.d.ts.map
+src/*.js
+src/*.js.map
