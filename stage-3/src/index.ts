@@ -62,6 +62,21 @@ interface AcceptedTerms {
   capacities: Record<string, number>;
 }
 
+interface HistoryChange {
+  field: string;
+  from: any;
+  to: any;
+}
+
+interface HistoryEntry {
+  seq: number;
+  at: string;
+  event: 'created' | 'changed' | 'cancelled';
+  revision: number;
+  accepted_terms: AcceptedTerms;
+  changes: HistoryChange[];
+}
+
 interface Reservation {
   id: string;
   reference: string;
@@ -77,6 +92,7 @@ interface Reservation {
   created_at: string;
   revision: number;
   accepted_terms: AcceptedTerms;
+  history: HistoryEntry[];
 }
 
 interface Fixture {
@@ -95,6 +111,7 @@ let state: {
   tokens: Record<string, string>; // token -> user_id mapping
   policies: Record<string, Policy[]>; // restaurant_id -> published policies in publication order
   nextPolicyVersion: Record<string, number>; // restaurant_id -> next version to allocate
+  history: Record<string, HistoryEntry[]>; // reservation_id -> history entries
 } = {
   users: {},
   restaurants: {},
@@ -103,7 +120,24 @@ let state: {
   exportState: null,
   tokens: {},
   policies: {},
-  nextPolicyVersion: {}
+  nextPolicyVersion: {},
+  history: {}
+};
+
+// Append a history entry to a reservation (seq continues from the last entry)
+const appendHistory = (reservation: Reservation, event: HistoryEntry['event'],
+                       changes: HistoryChange[]): void => {
+  const entries = state.history[reservation.id] || [];
+  const entry: HistoryEntry = {
+    seq: entries.length + 1,
+    at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true }),
+    event,
+    revision: reservation.revision,
+    accepted_terms: reservation.accepted_terms,
+    changes
+  };
+  entries.push(entry);
+  state.history[reservation.id] = entries;
 };
 
 const app = express();
@@ -461,7 +495,8 @@ app.post('/_test/reset', (req, res) => {
     exportState: null,
     tokens: savedTokens, // Preserve issued tokens
     policies: {},
-    nextPolicyVersion: {}
+    nextPolicyVersion: {},
+    history: {}
   };
 
   // Load fixture data
@@ -497,6 +532,7 @@ fixture.reservations.forEach(reservation => {
     normalizedReservation.status = reservation.status || 'confirmed';
     normalizedReservation.revision = 1;
     normalizedReservation.accepted_terms = fixtureAcceptedTerms(getRestaurantById(reservation.restaurant_id)!);
+    normalizedReservation.history = [];
     
     // If starts_at_local is provided, compute the absolute instants
     if (reservation.starts_at_local) {
@@ -528,6 +564,19 @@ fixture.reservations.forEach(reservation => {
     }
     
     state.reservations[normalizedReservation.id] = normalizedReservation;
+    // Seed the created history entry for the seeded reservation
+    const tableIds = normalizedReservation.table_ids && normalizedReservation.table_ids.length > 0
+      ? normalizedReservation.table_ids
+      : [normalizedReservation.table_id];
+    const createdChanges: HistoryChange[] = [];
+    if (tableIds.length === 1) {
+      createdChanges.push({ field: 'table_id', from: null, to: tableIds[0] });
+    } else {
+      createdChanges.push({ field: 'table_ids', from: null, to: tableIds });
+    }
+    createdChanges.push({ field: 'starts_at_local', from: null, to: normalizedReservation.starts_at_local });
+    createdChanges.push({ field: 'party_size', from: null, to: normalizedReservation.party_size });
+    appendHistory(normalizedReservation, 'created', createdChanges);
   });
 
   res.status(204).send();
@@ -546,7 +595,8 @@ app.get('/_test/export', (req, res) => {
       exportState: state.exportState,
       tokens: state.tokens,
       policies: state.policies,
-      nextPolicyVersion: state.nextPolicyVersion
+      nextPolicyVersion: state.nextPolicyVersion,
+      history: state.history
     }
   });
 });
@@ -573,6 +623,7 @@ app.post('/_test/import', (req, res) => {
   state.tokens = importedState.tokens || {};
   state.policies = importedState.policies || {};
   state.nextPolicyVersion = importedState.nextPolicyVersion || {};
+  state.history = importedState.history || {};
 
   res.status(204).send();
 });
@@ -1105,8 +1156,7 @@ const generateAvailableSlots = (restaurant: Restaurant, dateStr: string, partySi
     const slot: any = {
       starts_at_local: slotStart.toFormat('yyyy-MM-dd\'T\'HH:mm'), // YYYY-MM-DDTHH:MM format
       starts_at: slotStart.toISO({ suppressMilliseconds: true }),
-      available_table_ids: availableTables.map(t => t.id),
-      available_options: availableOptions
+      available_table_ids: availableTables.map(t => t.id)
     };
 
     if (explain) {
@@ -1445,11 +1495,23 @@ const closesAt = DateTime.fromObject({
     status: 'confirmed',
     created_at: DateTime.now().toISO({ suppressMilliseconds: true, includeOffset: true }),
     revision: 1,
-    accepted_terms: policy
+    accepted_terms: policy,
+    history: []
   };
 
   // Store reservation
   state.reservations[reservationId] = reservation;
+
+  // Record the created history entry
+  const createdChanges: HistoryChange[] = [];
+  if (tableSet.length === 1) {
+    createdChanges.push({ field: 'table_id', from: null, to: tableSet[0] });
+  } else {
+    createdChanges.push({ field: 'table_ids', from: null, to: tableSet });
+  }
+  createdChanges.push({ field: 'starts_at_local', from: null, to: starts_at_local });
+  createdChanges.push({ field: 'party_size', from: null, to: party_size });
+  appendHistory(reservation, 'created', createdChanges);
 
   // Prepare the exact response that will be sent
   const responseToSend = serializeReservation(reservation);
@@ -1546,6 +1608,44 @@ app.get('/reservations/:reference/decision', (req, res) => {
   });
 });
 
+// Reservation history: the reservation's own record, oldest first.
+// Owner-only; anyone else (including anonymous) gets 404 not_found, not 401.
+app.get('/reservations/:reference/history', (req, res) => {
+  const reference = req.params.reference;
+  const reservation = getReservationByReference(reference || '');
+
+  if (!reservation) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Reservation not found'
+      }
+    });
+  }
+
+  const authHeader = req.headers.authorization;
+  let userId: string | null = null;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    userId = state.tokens[token] || null;
+  }
+
+  if (userId !== reservation.user_id) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Reservation not found'
+      }
+    });
+  }
+
+  const entries = (state.history[reservation.id] || []).slice().sort((a, b) => a.seq - b.seq);
+  res.status(200).json({
+    reference: reservation.reference,
+    entries
+  });
+});
+
 app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
   const reference = req.params.reference;
   const userId = (req as any).user.id;
@@ -1571,28 +1671,18 @@ app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
     });
   }
   
-  // Check if already cancelled
+  // Check if already cancelled: repeat cancel changes nothing
   if (reservation.status === 'cancelled') {
-    return res.status(200).json(reservation);
+    return res.status(200).json(serializeReservation(reservation));
   }
   
-  // Check cancellation cutoff
-  const restaurant = getRestaurantById(reservation.restaurant_id);
-  if (!restaurant) {
-    return res.status(404).json({
-      error: {
-        code: 'not_found',
-        message: 'Restaurant not found'
-      }
-    });
-  }
-  
+  // Check cancellation cutoff against the accepted terms
   const startsAt = DateTime.fromISO(reservation.starts_at);
   const now = DateTime.now();
   const timeUntilStart = startsAt.diff(now, 'minutes').minutes;
   
   // Check if cancellation is within cutoff period
-  if (timeUntilStart <= restaurant.cancellation_cutoff_minutes) {
+  if (timeUntilStart <= reservation.accepted_terms.cancellation_cutoff_minutes) {
     return res.status(409).json({
       error: {
         code: 'cutoff_passed',
@@ -1601,8 +1691,10 @@ app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
     });
   }
   
-  // Cancel reservation
+  // Cancel reservation: increment revision once, record terminal entry
   reservation.status = 'cancelled';
+  reservation.revision += 1;
+  appendHistory(reservation, 'cancelled', []);
   
   res.status(200).json(serializeReservation(reservation));
 });
@@ -1610,10 +1702,10 @@ app.post('/reservations/:reference/cancel', authenticate, (req, res) => {
 app.patch('/reservations/:reference', authenticate, (req, res) => {
   const reference = req.params.reference;
   const userId = (req as any).user.id;
-  const { table_id, table_ids, starts_at_local, party_size } = req.body;
+  const { table_id, table_ids, starts_at_local, party_size, expected_revision } = req.body;
 
   const reservation = getReservationByReference(reference || '');
-  
+
   if (!reservation) {
     return res.status(404).json({
       error: {
@@ -1622,7 +1714,7 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
       }
     });
   }
-  
+
   // Check ownership
   if (reservation.user_id !== userId) {
     return res.status(404).json({
@@ -1632,7 +1724,7 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
       }
     });
   }
-  
+
   // Check if cancelled
   if (reservation.status === 'cancelled') {
     return res.status(409).json({
@@ -1642,7 +1734,29 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
       }
     });
   }
-  
+
+  // expected_revision: positive integer; wrong type/range -> 422;
+  // differing from current -> 409 stale_revision before cutoff/validation
+  if (expected_revision !== undefined) {
+    if (typeof expected_revision !== 'number' || !Number.isInteger(expected_revision) ||
+        expected_revision < 1) {
+      return res.status(422).json({
+        error: {
+          code: 'validation_failed',
+          message: 'Invalid expected_revision'
+        }
+      });
+    }
+    if (expected_revision !== reservation.revision) {
+      return res.status(409).json({
+        error: {
+          code: 'stale_revision',
+          message: 'Reservation revision has changed'
+        }
+      });
+    }
+  }
+
   // Validate inputs if provided
   if (party_size !== undefined && (typeof party_size !== 'number' || party_size < 1 || !Number.isInteger(party_size))) {
     return res.status(422).json({
@@ -1673,10 +1787,8 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
     });
   }
 
-  // Apply changes if provided
-  let updatedReservation = { ...reservation };
-  let changesMade = false;
-
+  // Resolve the requested table set (or the current one when unchanged)
+  let newTableSet: string[] | null = null;
   if (table_ids !== undefined) {
     if (!Array.isArray(table_ids) || table_ids.length < 1 || table_ids.length > 2 ||
         table_ids.some(id => typeof id !== 'string')) {
@@ -1720,9 +1832,7 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
         });
       }
     }
-    updatedReservation.table_id = table_ids[0];
-    updatedReservation.table_ids = table_ids;
-    changesMade = true;
+    newTableSet = table_ids;
   } else if (table_id !== undefined) {
     // Validate table exists in the restaurant
     const table = restaurant.tables.find(t => t.id === table_id);
@@ -1734,140 +1844,133 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
         }
       });
     }
-    updatedReservation.table_id = table_id;
-    updatedReservation.table_ids = [table_id];
-    changesMade = true;
+    newTableSet = [table_id];
   }
 
-  if (starts_at_local !== undefined) {
-    // Validate time format
-    if (!validateTimeFormat(starts_at_local)) {
-      return res.status(422).json({
-        error: {
-          code: 'validation_failed',
-          message: 'Invalid time format'
-        }
-      });
-    }
-    updatedReservation.starts_at_local = starts_at_local;
-    changesMade = true;
+  // Validate time format if provided
+  if (starts_at_local !== undefined && !validateTimeFormat(starts_at_local)) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid time format'
+      }
+    });
   }
 
-  if (party_size !== undefined) {
-    updatedReservation.party_size = party_size;
-    changesMade = true;
-  }
+  const currentTableSet: string[] = reservation.table_ids && reservation.table_ids.length > 0
+    ? reservation.table_ids
+    : [reservation.table_id];
+  const newStartsAt = starts_at_local !== undefined
+    ? DateTime.fromISO(starts_at_local, { zone: restaurant.timezone })
+    : DateTime.fromISO(reservation.starts_at);
+  const newPartySize = party_size !== undefined ? party_size : reservation.party_size;
+  const resultingTableSet: string[] = newTableSet || currentTableSet;
 
-  if (!changesMade) {
-    // No changes made, return current reservation
-    // Use the same response format as create endpoint
+  // Detect a no-op amendment: every provided field equals its current value.
+  // A no-op still requires a confirmed, editable booking but records no entry.
+  const tableUnchanged = newTableSet === null ||
+    newTableSet.length === currentTableSet.length &&
+    newTableSet.every((id, i) => id === currentTableSet[i]);
+  const timeUnchanged = starts_at_local === undefined || starts_at_local === reservation.starts_at_local;
+  const partyUnchanged = party_size === undefined || party_size === reservation.party_size;
+  if (tableUnchanged && timeUnchanged && partyUnchanged) {
     return res.status(200).json(serializeReservation(reservation));
   }
 
-  // Validate changes
-  const newStartsAt = starts_at_local ? DateTime.fromISO(starts_at_local, { zone: restaurant.timezone }) : DateTime.fromISO(reservation.starts_at);
-  const newPartySize = party_size !== undefined ? party_size : reservation.party_size;
-  const newTableSet: string[] = table_ids !== undefined
-    ? table_ids
-    : table_id !== undefined
-      ? [table_id]
-      : (reservation.table_ids && reservation.table_ids.length > 0 ? reservation.table_ids : [reservation.table_id]);
+  // Check the OLD accepted cutoff first, against the current start
+  const oldStartsAt = DateTime.fromISO(reservation.starts_at);
+  const timeUntilStart = oldStartsAt.diff(DateTime.now(), 'minutes').minutes;
+  if (timeUntilStart <= reservation.accepted_terms.cancellation_cutoff_minutes) {
+    return res.status(409).json({
+      error: {
+        code: 'cutoff_passed',
+        message: 'Change deadline passed'
+      }
+    });
+  }
 
-  // Validate party size vs combined capacity
-  const newTables = newTableSet.map(id => restaurant.tables.find(t => t.id === id));
-  if (newTables.every(t => t)) {
-    const combinedCapacity = newTables.reduce((sum, t) => sum + t!.capacity, 0);
-    if (newPartySize > combinedCapacity) {
-      return res.status(422).json({
-        error: {
-          code: 'party_exceeds_capacity',
-          message: 'Party size exceeds table capacity'
-        }
-      });
-    }
+  // Validate all resulting fields against the policy applicable to the
+  // resulting start date
+  const localDate = newStartsAt.toFormat('yyyy-MM-dd');
+  const policy = selectPolicy(restaurant, localDate);
+
+  // Validate party size vs combined capacity (from the selected policy)
+  const combinedCapacity = resultingTableSet.reduce((sum, id) => sum + (policy.capacities[id] ?? 0), 0);
+  if (newPartySize > combinedCapacity) {
+    return res.status(422).json({
+      error: {
+        code: 'party_exceeds_capacity',
+        message: 'Party size exceeds table capacity'
+      }
+    });
   }
 
   // Check if start time is on slot grid
-  if (starts_at_local) {
-    const startMinutes = newStartsAt.hour * 60 + newStartsAt.minute;
-    if (startMinutes % restaurant.slot_minutes !== 0) {
-      return res.status(422).json({
-        error: {
-          code: 'not_on_slot_grid',
-          message: 'Start time is not on slot grid'
-        }
-      });
-    }
+  const startMinutes = newStartsAt.hour * 60 + newStartsAt.minute;
+  if (startMinutes % policy.slot_minutes !== 0) {
+    return res.status(422).json({
+      error: {
+        code: 'not_on_slot_grid',
+        message: 'Start time is not on slot grid'
+      }
+    });
   }
 
   // Check if reservation would be within opening hours
-  if (starts_at_local) {
-    const weekday = newStartsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][newStartsAt.weekday - 1];
-    const openingHour = restaurant.opening_hours.find(h => h.weekday === weekday);
-    if (!openingHour) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation outside opening hours'
-        }
-      });
-    }
-
-    const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
-    const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
-
-    const opensAt = DateTime.fromObject({
-      year: newStartsAt.year,
-      month: newStartsAt.month,
-      day: newStartsAt.day,
-      hour: openHour,
-      minute: openMinute
-    }, { zone: restaurant.timezone });
-
-    const closesAt = DateTime.fromObject({
-      year: newStartsAt.year,
-      month: newStartsAt.month,
-      day: newStartsAt.day,
-      hour: closeHour,
-      minute: closeMinute
-    }, { zone: restaurant.timezone });
-
-    if (newStartsAt < opensAt || newStartsAt >= closesAt) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation outside opening hours'
-        }
-      });
-    }
-
-    // Check if reservation would end after closing
-    const endsAt = newStartsAt.plus({ minutes: restaurant.reservation_duration_minutes });
-    if (endsAt > closesAt) {
-      return res.status(422).json({
-        error: {
-          code: 'outside_opening_hours',
-          message: 'Reservation would end after closing'
-        }
-      });
-    }
+  const weekday = newStartsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][newStartsAt.weekday - 1];
+  const openingHour = policy.opening_hours.find(h => h.weekday === weekday);
+  if (!openingHour) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation outside opening hours'
+      }
+    });
   }
 
-  // Check for overlapping reservations
-  let updatedEndsAt: DateTime<true> | DateTime<false>;
+  const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
+  const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
+
+  const opensAt = DateTime.fromObject({
+    year: newStartsAt.year,
+    month: newStartsAt.month,
+    day: newStartsAt.day,
+    hour: openHour,
+    minute: openMinute
+  }, { zone: restaurant.timezone });
+
+  const closesAt = DateTime.fromObject({
+    year: newStartsAt.year,
+    month: newStartsAt.month,
+    day: newStartsAt.day,
+    hour: closeHour,
+    minute: closeMinute
+  }, { zone: restaurant.timezone });
+
+  if (newStartsAt < opensAt || newStartsAt >= closesAt) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation outside opening hours'
+      }
+    });
+  }
+
+  // Check if reservation would end after closing
+  const endsAt = newStartsAt.plus({ minutes: policy.reservation_duration_minutes });
+  if (endsAt > closesAt) {
+    return res.status(422).json({
+      error: {
+        code: 'outside_opening_hours',
+        message: 'Reservation would end after closing'
+      }
+    });
+  }
+
+  // Check for overlapping reservations on any table in the new set
   const reservationConflict = Object.values(state.reservations).find(res => {
     if (res.id === reservation.id || res.status !== 'confirmed') return false;
-
-    // Calculate updated ends time for overlap check
-    if (starts_at_local) {
-      const updatedStartsAt = DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
-      updatedEndsAt = updatedStartsAt.plus({ minutes: restaurant.reservation_duration_minutes });
-    } else {
-      updatedEndsAt = DateTime.fromISO(reservation.ends_at);
-    }
-
-    // Check for overlap on any table in the new set
-    return newTableSet.some(tableId => reservationOccupiesTable(res, tableId, newStartsAt, updatedEndsAt));
+    return resultingTableSet.some(tableId => reservationOccupiesTable(res, tableId, newStartsAt, endsAt));
   });
 
   if (reservationConflict) {
@@ -1879,52 +1982,36 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
     });
   }
 
-// Update reservation
-  updatedReservation.starts_at_local = starts_at_local || reservation.starts_at_local;
-  updatedReservation.party_size = party_size !== undefined ? party_size : reservation.party_size;
-  updatedReservation.table_id = newTableSet[0];
-  updatedReservation.table_ids = newTableSet;
-  
-  // Check cutoff for changes
-  // Always check cutoff regardless of what's changed (rule applies to current start time)
-  if (restaurant) {
-    // Determine the start time to check against cutoff
-    let startsAtToCheck: DateTime<true> | DateTime<false>;
-    
-    if (starts_at_local) {
-      // If new start time is provided, use it
-      startsAtToCheck = DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
+  // Build the history changes for the fields that actually changed,
+  // in the order table_id/table_ids, starts_at_local, party_size
+  const changes: HistoryChange[] = [];
+  if (!tableUnchanged) {
+    if (resultingTableSet.length === 1) {
+      const from = currentTableSet.length === 1 ? currentTableSet[0] : currentTableSet;
+      changes.push({ field: 'table_id', from, to: resultingTableSet[0] });
     } else {
-      // If no new start time, use the existing start time
-      startsAtToCheck = DateTime.fromISO(reservation.starts_at);
-    }
-    
-    const now = DateTime.now();
-    const timeUntilStart = startsAtToCheck.diff(now, 'minutes').minutes;
-    
-    // Check if change is within cutoff period
-    if (timeUntilStart <= restaurant.cancellation_cutoff_minutes) {
-      return res.status(409).json({
-        error: {
-          code: 'cutoff_passed',
-          message: 'Change deadline passed'
-        }
-      });
+      changes.push({ field: 'table_ids', from: currentTableSet, to: resultingTableSet });
     }
   }
-  
-  // Update times based on new start time
-  if (starts_at_local) {
-    const updatedStartsAt = DateTime.fromISO(updatedReservation.starts_at_local, { zone: restaurant.timezone });
-    const updatedEndsAt = updatedStartsAt.plus({ minutes: restaurant.reservation_duration_minutes });
-    
-    updatedReservation.starts_at = updatedStartsAt.toISO({ suppressMilliseconds: true }) || '';
-    updatedReservation.ends_at = updatedEndsAt.toISO({ suppressMilliseconds: true }) || '';
+  if (!timeUnchanged) {
+    changes.push({ field: 'starts_at_local', from: reservation.starts_at_local, to: starts_at_local });
+  }
+  if (!partyUnchanged) {
+    changes.push({ field: 'party_size', from: reservation.party_size, to: newPartySize });
   }
 
-  state.reservations[reservation.id] = updatedReservation;
+  // Atomically replace accepted terms and end time, increment revision once
+  reservation.table_id = resultingTableSet[0];
+  reservation.table_ids = resultingTableSet;
+  reservation.starts_at_local = starts_at_local !== undefined ? starts_at_local : reservation.starts_at_local;
+  reservation.starts_at = newStartsAt.toISO({ suppressMilliseconds: true });
+  reservation.ends_at = endsAt.toISO({ suppressMilliseconds: true });
+  reservation.party_size = newPartySize;
+  reservation.accepted_terms = policy;
+  reservation.revision += 1;
+  appendHistory(reservation, 'changed', changes);
 
-  res.status(200).json(serializeReservation(updatedReservation));
+  res.status(200).json(serializeReservation(reservation));
 });
 
 // Reservation moves route
