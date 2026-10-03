@@ -2,3 +2,5 @@ node_modules/
 checks/
 *.log
 dist/
+*.d.ts
+*.d.ts.map
