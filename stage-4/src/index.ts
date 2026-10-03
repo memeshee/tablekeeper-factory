@@ -105,6 +105,31 @@ interface Series {
   exceptions: Record<string, boolean>; // reference -> exception flag
 }
 
+interface Closure {
+  table_id: string;
+  from: string;
+  to: string;
+}
+
+interface PlanAssignment {
+  reference: string;
+  table_ids: string[];
+  changed: boolean;
+}
+
+interface Plan {
+  id: string;
+  restaurant_id: string;
+  restaurant_revision: number;
+  closure: Closure;
+  assignments: PlanAssignment[];
+  moved_count: number;
+  unused_seats: number;
+  applied: boolean;
+  applied_key?: string;
+  applied_response?: any;
+}
+
 interface Fixture {
   users: User[];
   restaurants: Restaurant[];
@@ -125,6 +150,8 @@ let state: {
   series: Record<string, Series>; // series_id -> series
   seriesByReservation: Record<string, string>; // reservation reference -> series_id
   restaurantRevisions: Record<string, number>; // restaurant_id -> revision counter
+  closures: Record<string, Closure[]>; // restaurant_id -> applied closures
+  plans: Record<string, Plan>; // plan_id -> plan
 } = {
   users: {},
   restaurants: {},
@@ -137,7 +164,9 @@ let state: {
   history: {},
   series: {},
   seriesByReservation: {},
-  restaurantRevisions: {}
+  restaurantRevisions: {},
+  closures: {},
+  plans: {}
 };
 
 // Append a history entry to a reservation (seq continues from the last entry)
@@ -271,6 +300,16 @@ const selectPolicy = (restaurant: Restaurant, localDate: string): {
     opening_hours: restaurant.opening_hours,
     capacities: Object.fromEntries(restaurant.tables.map(t => [t.id, t.capacity]))
   };
+};
+
+const closureBlocksTable = (restaurantId: string, tableId: string, start: DateTime, end: DateTime): boolean => {
+  const closures = state.closures[restaurantId] || [];
+  return closures.some(closure => {
+    if (closure.table_id !== tableId) return false;
+    const closureStart = DateTime.fromISO(closure.from);
+    const closureEnd = DateTime.fromISO(closure.to);
+    return !(end <= closureStart || start >= closureEnd);
+  });
 };
 
 // Check whether a reservation occupies a given table at the given interval
@@ -515,7 +554,9 @@ app.post('/_test/reset', (req, res) => {
     history: {},
     series: {},
     seriesByReservation: {},
-    restaurantRevisions: {}
+    restaurantRevisions: {},
+    closures: {},
+    plans: {}
   };
 
   // Load fixture data
@@ -619,7 +660,9 @@ app.get('/_test/export', (req, res) => {
       history: state.history,
       series: state.series,
       seriesByReservation: state.seriesByReservation,
-      restaurantRevisions: state.restaurantRevisions
+      restaurantRevisions: state.restaurantRevisions,
+      closures: state.closures,
+      plans: state.plans
     }
   });
 });
@@ -650,6 +693,8 @@ app.post('/_test/import', (req, res) => {
   state.series = importedState.series || {};
   state.seriesByReservation = importedState.seriesByReservation || {};
   state.restaurantRevisions = importedState.restaurantRevisions || {};
+  state.closures = importedState.closures || {};
+  state.plans = importedState.plans || {};
 
   res.status(204).send();
 });
@@ -1167,13 +1212,15 @@ const generateAvailableSlots = (restaurant: Restaurant, dateStr: string, partySi
         if (capA === undefined || capB === undefined) continue;
         const capacity = capA + capB;
         if (capacity < partySize) continue;
-        // Check both tables are free (no overlapping confirmed reservation on either)
-        const aFree = !Object.values(state.reservations).some(res =>
-          res.status === 'confirmed' && reservationOccupiesTable(res, a, slotStart, slotEndDateTime)
-        );
-        const bFree = !Object.values(state.reservations).some(res =>
-          res.status === 'confirmed' && reservationOccupiesTable(res, b, slotStart, slotEndDateTime)
-        );
+        // Check both tables are free (no overlapping confirmed reservation or closure on either)
+        const aFree = !closureBlocksTable(restaurant.id, a, slotStart, slotEndDateTime) &&
+          !Object.values(state.reservations).some(res =>
+            res.status === 'confirmed' && reservationOccupiesTable(res, a, slotStart, slotEndDateTime)
+          );
+        const bFree = !closureBlocksTable(restaurant.id, b, slotStart, slotEndDateTime) &&
+          !Object.values(state.reservations).some(res =>
+            res.status === 'confirmed' && reservationOccupiesTable(res, b, slotStart, slotEndDateTime)
+          );
         if (aFree && bFree) {
           availableOptions.push({ table_ids: [a, b], capacity });
         }
@@ -1191,9 +1238,10 @@ const generateAvailableSlots = (restaurant: Restaurant, dateStr: string, partySi
       slot.explain = restaurant.tables.map(table => {
         const cap = policy.capacities[table.id];
         const capacityHolds = cap !== undefined && cap >= partySize;
-        const noOverlapHolds = !Object.values(state.reservations).some(res =>
-          res.status === 'confirmed' && reservationOccupiesTable(res, table.id, slotStart, slotEndDateTime)
-        );
+        const noOverlapHolds = !closureBlocksTable(restaurant.id, table.id, slotStart, slotEndDateTime) &&
+          !Object.values(state.reservations).some(res =>
+            res.status === 'confirmed' && reservationOccupiesTable(res, table.id, slotStart, slotEndDateTime)
+          );
         return {
           table_id: table.id,
           policy_version: policy.policy_version,
@@ -1223,11 +1271,11 @@ const getAvailableTables = (restaurant: Restaurant, start: DateTime, end: DateTi
     return cap !== undefined && cap >= partySize;
   });
 
-  // Check for conflicts with existing reservations
+  // Check for conflicts with existing reservations and applied closures
   const availableTables = [];
 
   for (const table of eligibleTables) {
-    let isAvailable = true;
+    let isAvailable = !closureBlocksTable(restaurant.id, table.id, start, end);
 
     // Check existing reservations for this table
     for (const reservation of Object.values(state.reservations)) {
@@ -1490,7 +1538,17 @@ const closesAt = DateTime.fromObject({
     });
   }
 
-  // Check for overlapping reservations on any table in the set
+  // Check for overlapping reservations or applied closures on any table in the set
+  const closureConflict = tableSet.some(tableId => closureBlocksTable(restaurant_id, tableId, startsAt, endsAt));
+  if (closureConflict) {
+    return res.status(409).json({
+      error: {
+        code: 'table_unavailable',
+        message: 'Table is not available at the requested time'
+      }
+    });
+  }
+
   const reservationConflict = Object.values(state.reservations).find(res => {
     if (res.status !== 'confirmed') return false;
     return tableSet.some(tableId => reservationOccupiesTable(res, tableId, startsAt, endsAt));
@@ -1877,6 +1935,768 @@ app.get('/series/:series_id', (req, res) => {
     interval_weeks: series.interval_weeks,
     occurrences
   });
+});
+
+// Hook for task 3 (seating repairs): bump the series revision once when at
+// least one member of the series is moved by a plan application.
+const noteSeriesOccurrenceMoved = (seriesId: string): void => {
+  const series = state.series[seriesId];
+  if (series) {
+    series.revision += 1;
+  }
+};
+
+// Stage 4: seating changes after a table closure
+const isManager = (restaurant: Restaurant, userId: string): boolean => {
+  const managers = Array.isArray(restaurant.manager_user_ids) ? restaurant.manager_user_ids : [];
+  return managers.includes(userId);
+};
+
+const getTableSet = (reservation: Reservation): string[] => {
+  return reservation.table_ids && reservation.table_ids.length > 0
+    ? reservation.table_ids
+    : [reservation.table_id];
+};
+
+const optionRank = (restaurant: Restaurant, tableIds: string[]): number => {
+  const singles = restaurant.tables.map(t => t.id);
+  const singleIndex = singles.indexOf(tableIds[0]);
+  if (tableIds.length === 1 && singleIndex !== -1) {
+    return singleIndex;
+  }
+  const pairs = Array.isArray(restaurant.combinable) ? restaurant.combinable : [];
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i];
+    if (!Array.isArray(pair) || pair.length !== 2) continue;
+    if ((pair[0] === tableIds[0] && pair[1] === tableIds[1]) ||
+        (pair[0] === tableIds[1] && pair[1] === tableIds[0])) {
+      return singles.length + i;
+    }
+  }
+  return Number.MAX_SAFE_INTEGER;
+};
+
+const isTableSetEqual = (a: string[], b: string[]): boolean => {
+  return a.length === b.length && a.every((id, i) => id === b[i]);
+};
+
+const tableSetCapacity = (terms: AcceptedTerms, tableIds: string[]): number => {
+  return tableIds.reduce((sum, id) => sum + (terms.capacities[id] ?? 0), 0);
+};
+
+const isTableSetAvailableForPlan = (
+  restaurant: Restaurant,
+  tableIds: string[],
+  start: DateTime,
+  end: DateTime,
+  fixedReservations: Reservation[],
+  assignedReservations: Map<string, string[]>,
+  extraClosures: Closure[] = []
+): boolean => {
+  const allClosures = [...(state.closures[restaurant.id] || []), ...extraClosures];
+  for (const tableId of tableIds) {
+    for (const c of allClosures) {
+      if (c.table_id !== tableId) continue;
+      const cStart = DateTime.fromISO(c.from);
+      const cEnd = DateTime.fromISO(c.to);
+      if (!(end <= cStart || start >= cEnd)) return false;
+    }
+  }
+  for (const res of fixedReservations) {
+    if (res.status !== 'confirmed') continue;
+    const fixedTables = getTableSet(res);
+    if (tableIds.some(tableId => fixedTables.includes(tableId))) {
+      const resStart = DateTime.fromISO(res.starts_at);
+      const resEnd = DateTime.fromISO(res.ends_at);
+      if (!(end <= resStart || start >= resEnd)) return false;
+    }
+  }
+  for (const [ref, assignedTables] of assignedReservations.entries()) {
+    if (tableIds.some(tableId => assignedTables.includes(tableId))) {
+      const res = getReservationByReference(ref);
+      if (!res) continue;
+      const resStart = DateTime.fromISO(res.starts_at);
+      const resEnd = DateTime.fromISO(res.ends_at);
+      if (!(end <= resStart || start >= resEnd)) return false;
+    }
+  }
+  return true;
+};
+
+const planSeating = (
+  restaurant: Restaurant,
+  closure: Closure,
+  considered: Reservation[],
+  fixed: Reservation[]
+): { assignments: PlanAssignment[]; moved_count: number; unused_seats: number } | null => {
+  const closureStart = DateTime.fromISO(closure.from);
+  const closureEnd = DateTime.fromISO(closure.to);
+  const consideredRefs = considered.map(r => r.reference).sort();
+  const consideredByRef = new Map(considered.map(r => [r.reference, r]));
+
+  const options: { tableIds: string[]; capacity: number; rank: number }[] = [];
+  for (const table of restaurant.tables) {
+    options.push({
+      tableIds: [table.id],
+      capacity: table.capacity,
+      rank: optionRank(restaurant, [table.id])
+    });
+  }
+  if (Array.isArray(restaurant.combinable)) {
+    for (const pair of restaurant.combinable) {
+      if (!Array.isArray(pair) || pair.length !== 2) continue;
+      const [a, b] = pair;
+      const capA = restaurant.tables.find(t => t.id === a)?.capacity ?? 0;
+      const capB = restaurant.tables.find(t => t.id === b)?.capacity ?? 0;
+      options.push({
+        tableIds: [a, b],
+        capacity: capA + capB,
+        rank: optionRank(restaurant, [a, b])
+      });
+    }
+  }
+
+  const feasibleFor = (reservation: Reservation, tableIds: string[]): boolean => {
+    const start = DateTime.fromISO(reservation.starts_at);
+    const end = DateTime.fromISO(reservation.ends_at);
+    if (tableSetCapacity(reservation.accepted_terms, tableIds) < reservation.party_size) return false;
+    return isTableSetAvailableForPlan(restaurant, tableIds, start, end, fixed, new Map());
+  };
+
+  const currentAssignment = new Map(considered.map(r => [r.reference, getTableSet(r)]));
+  const feasibleCurrent = considered.every(r => feasibleFor(r, currentAssignment.get(r.reference)!));
+  if (feasibleCurrent) {
+    const unused = considered.reduce((sum, r) => {
+      return sum + (tableSetCapacity(r.accepted_terms, currentAssignment.get(r.reference)!) - r.party_size);
+    }, 0);
+    return {
+      assignments: consideredRefs.map(ref => ({
+        reference: ref,
+        table_ids: currentAssignment.get(ref)!,
+        changed: false
+      })),
+      moved_count: 0,
+      unused_seats: unused
+    };
+  }
+
+  const candidates = considered.map(r => {
+    const current = currentAssignment.get(r.reference)!;
+    const currentRank = optionRank(restaurant, current);
+    const feasibleOptions = options.filter(o => feasibleFor(r, o.tableIds));
+    if (feasibleOptions.length === 0) return null;
+    feasibleOptions.sort((a, b) => {
+      if (a.capacity - r.party_size !== b.capacity - r.party_size) {
+        return (a.capacity - r.party_size) - (b.capacity - r.party_size);
+      }
+      return a.rank - b.rank;
+    });
+    const best = feasibleOptions[0];
+    const changed = !isTableSetEqual(best.tableIds, current);
+    return {
+      reservation: r,
+      tableIds: best.tableIds,
+      unused: best.capacity - r.party_size,
+      changed,
+      rank: best.rank,
+      currentRank
+    };
+  });
+  if (candidates.some(c => c === null)) return null;
+
+  const assigned = new Map<string, string[]>();
+  for (const c of candidates) {
+    assigned.set(c.reservation.reference, c.tableIds);
+  }
+  const conflict = considered.some((r, i) => {
+    const start = DateTime.fromISO(r.starts_at);
+    const end = DateTime.fromISO(r.ends_at);
+    return !isTableSetAvailableForPlan(restaurant, candidates[i].tableIds, start, end, fixed, assigned);
+  });
+  if (conflict) return null;
+
+  const moved_count = candidates.filter(c => c.changed).length;
+  const unused_seats = candidates.reduce((sum, c) => sum + c.unused, 0);
+  return {
+    assignments: consideredRefs.map(ref => {
+      const c = candidates.find(x => x.reservation.reference === ref)!;
+      return {
+        reference: ref,
+        table_ids: c.tableIds,
+        changed: c.changed
+      };
+    }),
+    moved_count,
+    unused_seats
+  };
+};
+
+app.post('/restaurants/:id/replans', authenticate, (req, res) => {
+  const restaurant = getRestaurantById(req.params.id);
+  if (!restaurant) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Restaurant not found'
+      }
+    });
+  }
+
+  const userId = (req as any).user.id;
+  if (!isManager(restaurant, userId)) {
+    return res.status(403).json({
+      error: {
+        code: 'forbidden',
+        message: 'Only managers may create replans'
+      }
+    });
+  }
+
+  const idempotencyKey = req.headers['idempotency-key'] as string;
+  if (!idempotencyKey) {
+    return res.status(400).json({
+      error: {
+        code: 'missing_idempotency_key',
+        message: 'Idempotency key is required'
+      }
+    });
+  }
+
+  const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
+  if (keyEntry) {
+    if (JSON.stringify(req.body) === keyEntry.body) {
+      return res.status(200).json(keyEntry.response);
+    }
+    return res.status(409).json({
+      error: {
+        code: 'idempotency_key_reuse',
+        message: 'Idempotency key already used with different request body'
+      }
+    });
+  }
+
+  const { table_id, from, to } = req.body;
+  if (typeof table_id !== 'string' || !table_id ||
+      typeof from !== 'string' || !from ||
+      typeof to !== 'string' || !to) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid replan request'
+      }
+    });
+  }
+
+  const table = restaurant.tables.find(t => t.id === table_id);
+  if (!table) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Table not found'
+      }
+    });
+  }
+
+  const fromDt = DateTime.fromISO(from);
+  const toDt = DateTime.fromISO(to);
+  if (!fromDt.isValid || !toDt.isValid || fromDt >= toDt) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'Invalid interval'
+      }
+    });
+  }
+
+  const allReservations = Object.values(state.reservations).filter(r => r.restaurant_id === restaurant.id);
+  const considered = allReservations.filter(r => {
+    if (r.status !== 'confirmed') return false;
+    const start = DateTime.fromISO(r.starts_at);
+    const end = DateTime.fromISO(r.ends_at);
+    return !(end <= fromDt || start >= toDt);
+  });
+  const fixed = allReservations.filter(r => !considered.includes(r));
+
+  if (restaurant.tables.length > 6 ||
+      (Array.isArray(restaurant.combinable) ? restaurant.combinable.length : 0) > 4 ||
+      considered.length > 6) {
+    return res.status(422).json({
+      error: {
+        code: 'planning_limit',
+        message: 'Planning limit exceeded'
+      }
+    });
+  }
+
+  const closure: Closure = { table_id, from, to };
+  const plan = planSeating(restaurant, closure, considered, fixed);
+  if (!plan) {
+    return res.status(409).json({
+      error: {
+        code: 'no_feasible_plan',
+        message: 'No feasible seating plan'
+      }
+    });
+  }
+
+  const planId = `plan_${uuidv4().replace(/-/g, '').substring(0, 12)}`;
+  const restaurantRevision = state.restaurantRevisions[restaurant.id] || 0;
+  const response = {
+    plan_id: planId,
+    restaurant_revision: restaurantRevision,
+    closure,
+    assignments: plan.assignments,
+    moved_count: plan.moved_count,
+    unused_seats: plan.unused_seats
+  };
+
+  state.plans[planId] = {
+    id: planId,
+    restaurant_id: restaurant.id,
+    restaurant_revision: restaurantRevision,
+    closure,
+    assignments: plan.assignments,
+    moved_count: plan.moved_count,
+    unused_seats: plan.unused_seats,
+    applied: false
+  };
+
+  state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
+    userId,
+    body: JSON.stringify(req.body),
+    response
+  };
+
+  res.status(201).json(response);
+});
+
+app.post('/restaurants/:id/replans/:plan_id/apply', authenticate, (req, res) => {
+  const restaurant = getRestaurantById(req.params.id);
+  if (!restaurant) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Restaurant not found'
+      }
+    });
+  }
+
+  const userId = (req as any).user.id;
+  if (!isManager(restaurant, userId)) {
+    return res.status(403).json({
+      error: {
+        code: 'forbidden',
+        message: 'Only managers may apply replans'
+      }
+    });
+  }
+
+  const idempotencyKey = req.headers['idempotency-key'] as string;
+  if (!idempotencyKey) {
+    return res.status(400).json({
+      error: {
+        code: 'missing_idempotency_key',
+        message: 'Idempotency key is required'
+      }
+    });
+  }
+
+  const plan = state.plans[req.params.plan_id];
+  if (!plan || plan.restaurant_id !== restaurant.id) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Plan not found'
+      }
+    });
+  }
+
+  if (plan.applied) {
+    if (plan.applied_key === `${userId}:${idempotencyKey}` && plan.applied_response) {
+      return res.status(200).json(plan.applied_response);
+    }
+    return res.status(409).json({
+      error: {
+        code: 'plan_already_applied',
+        message: 'Plan already applied'
+      }
+    });
+  }
+
+  const currentRevision = state.restaurantRevisions[restaurant.id] || 0;
+  if (currentRevision !== plan.restaurant_revision) {
+    return res.status(409).json({
+      error: {
+        code: 'stale_plan',
+        message: 'Plan is stale'
+      }
+    });
+  }
+
+  const movedSeries = new Set<string>();
+  for (const assignment of plan.assignments) {
+    if (!assignment.changed) continue;
+    const reservation = getReservationByReference(assignment.reference);
+    if (!reservation || reservation.status !== 'confirmed') {
+      return res.status(409).json({
+        error: {
+          code: 'stale_plan',
+          message: 'Plan is stale'
+        }
+      });
+    }
+    const currentTables = getTableSet(reservation);
+    if (isTableSetEqual(currentTables, assignment.table_ids)) continue;
+
+    const start = DateTime.fromISO(reservation.starts_at);
+    const end = DateTime.fromISO(reservation.ends_at);
+    if (!isTableSetAvailableForPlan(restaurant, assignment.table_ids, start, end,
+      Object.values(state.reservations).filter(r => r.id !== reservation.id),
+      new Map())) {
+      return res.status(409).json({
+        error: {
+          code: 'stale_plan',
+          message: 'Plan is stale'
+        }
+      });
+    }
+
+    reservation.table_id = assignment.table_ids[0];
+    reservation.table_ids = assignment.table_ids;
+    reservation.revision += 1;
+    appendHistory(reservation, 'changed', [
+      { field: 'table_ids', from: currentTables, to: assignment.table_ids },
+      { field: 'plan_id', from: null, to: plan.id }
+    ]);
+
+    const seriesId = state.seriesByReservation[reservation.reference];
+    if (seriesId) movedSeries.add(seriesId);
+  }
+
+  state.closures[restaurant.id] = [...(state.closures[restaurant.id] || []), plan.closure];
+  state.restaurantRevisions[restaurant.id] = currentRevision + 1;
+  for (const seriesId of movedSeries) {
+    noteSeriesOccurrenceMoved(seriesId);
+  }
+
+  const reservations = plan.assignments
+    .map(a => getReservationByReference(a.reference))
+    .filter(Boolean)
+    .map(r => serializeReservation(r!));
+
+  const response = {
+    plan_id: plan.id,
+    restaurant_revision: state.restaurantRevisions[restaurant.id],
+    reservations
+  };
+
+  plan.applied = true;
+  plan.applied_key = `${userId}:${idempotencyKey}`;
+  plan.applied_response = response;
+
+  state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
+    userId,
+    body: JSON.stringify(req.body),
+    response
+  };
+
+  res.status(201).json(response);
+});
+
+// Amend a recurring series: change the clock time of eligible occurrences
+// (index >= from_index, not cancelled, not exception) on their scheduled dates.
+app.post('/series/:series_id/amend', authenticate, (req, res) => {
+  const userId = (req as any).user.id;
+  const series = state.series[req.params.series_id];
+  if (!series) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Series not found'
+      }
+    });
+  }
+  if (series.owner !== userId) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Series not found'
+      }
+    });
+  }
+
+  const { expected_revision, from_index, local_time } = req.body;
+
+  // Validate body fields
+  if (typeof expected_revision !== 'number' || !Number.isInteger(expected_revision) ||
+      expected_revision < 1) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'expected_revision must be a positive integer'
+      }
+    });
+  }
+  if (typeof from_index !== 'number' || !Number.isInteger(from_index) ||
+      from_index < 0 || from_index >= series.occurrences.length) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'from_index must be an integer in 0..count-1'
+      }
+    });
+  }
+  if (typeof local_time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(local_time)) {
+    return res.status(422).json({
+      error: {
+        code: 'validation_failed',
+        message: 'local_time must be HH:MM in 00:00..23:59'
+      }
+    });
+  }
+
+  // Idempotency key (stage-1 replay rules)
+  const idempotencyKey = req.headers['idempotency-key'] as string;
+  if (!idempotencyKey) {
+    return res.status(400).json({
+      error: {
+        code: 'missing_idempotency_key',
+        message: 'Idempotency key is required'
+      }
+    });
+  }
+  const keyEntry = state.idempotencyKeys[`${userId}:${idempotencyKey}`];
+  if (keyEntry) {
+    if (JSON.stringify(req.body) === keyEntry.body) {
+      return res.status(200).json(keyEntry.response);
+    }
+    return res.status(409).json({
+      error: {
+        code: 'idempotency_key_reuse',
+        message: 'Idempotency key already used with different request body'
+      }
+    });
+  }
+
+  // Stale revision check BEFORE any cutoff/validation
+  if (expected_revision !== series.revision) {
+    return res.status(409).json({
+      error: {
+        code: 'stale_revision',
+        message: 'Series revision has changed'
+      }
+    });
+  }
+
+  const restaurant = getRestaurantById(series.restaurant_id);
+  if (!restaurant) {
+    return res.status(404).json({
+      error: {
+        code: 'not_found',
+        message: 'Restaurant not found'
+      }
+    });
+  }
+
+  // Eligible occurrences: index >= from_index, not cancelled, not exception
+  const eligible: { index: number; reservation: Reservation }[] = [];
+  for (let i = from_index; i < series.occurrences.length; i++) {
+    const reservation = getReservationByReference(series.occurrences[i]);
+    if (!reservation) continue;
+    if (reservation.status === 'cancelled') continue;
+    if (series.exceptions[reservation.reference] === true) continue;
+    eligible.push({ index: i, reservation });
+  }
+
+  // Compute the resulting start for each eligible occurrence and detect no-ops
+  const planned: {
+    index: number;
+    reservation: Reservation;
+    newStartsAtLocal: string;
+    newStartsAt: DateTime;
+    newEndsAt: DateTime;
+    policy: ReturnType<typeof selectPolicy>;
+    isNoOp: boolean;
+  }[] = [];
+
+  for (const { index, reservation } of eligible) {
+    const currentStart = DateTime.fromISO(reservation.starts_at);
+    const newStartsAtLocal = currentStart.toFormat('yyyy-MM-dd') + 'T' + local_time;
+    const newStartsAt = DateTime.fromISO(newStartsAtLocal, { zone: restaurant.timezone });
+    if (!newStartsAt.isValid) {
+      return res.status(422).json({
+        error: {
+          code: 'invalid_local_time',
+          message: 'Invalid local time'
+        }
+      });
+    }
+    const localDate = newStartsAt.toFormat('yyyy-MM-dd');
+    const policy = selectPolicy(restaurant, localDate);
+    const newEndsAt = newStartsAt.plus({ minutes: policy.reservation_duration_minutes });
+    const isNoOp = newStartsAtLocal === reservation.starts_at_local;
+    planned.push({ index, reservation, newStartsAtLocal, newStartsAt, newEndsAt, policy, isNoOp });
+  }
+
+  // Real changes: validate in index order; first non-occupancy error wins
+  for (const p of planned) {
+    if (p.isNoOp) continue;
+    const { reservation, newStartsAt, newEndsAt, policy } = p;
+
+    // Old accepted cutoff first, against the current start
+    const oldStart = DateTime.fromISO(reservation.starts_at);
+    const timeUntilStart = oldStart.diff(DateTime.now(), 'minutes').minutes;
+    if (timeUntilStart <= reservation.accepted_terms.cancellation_cutoff_minutes) {
+      return res.status(409).json({
+        error: {
+          code: 'cutoff_passed',
+          message: 'Cancellation deadline passed'
+        }
+      });
+    }
+
+    // Capacity under the resulting-date policy
+    const tableSet: string[] = reservation.table_ids && reservation.table_ids.length > 0
+      ? reservation.table_ids
+      : [reservation.table_id];
+    const combinedCapacity = tableSet.reduce((sum, id) => sum + (policy.capacities[id] ?? 0), 0);
+    if (reservation.party_size > combinedCapacity) {
+      return res.status(422).json({
+        error: {
+          code: 'party_exceeds_capacity',
+          message: 'Party size exceeds table capacity'
+        }
+      });
+    }
+
+    // Slot grid
+    const startMinutes = newStartsAt.hour * 60 + newStartsAt.minute;
+    if (startMinutes % policy.slot_minutes !== 0) {
+      return res.status(422).json({
+        error: {
+          code: 'not_on_slot_grid',
+          message: 'Start time is not on slot grid'
+        }
+      });
+    }
+
+    // Opening hours
+    const weekday = newStartsAt.weekday === 7 ? 'sun' : ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'][newStartsAt.weekday - 1];
+    const openingHour = policy.opening_hours.find(h => h.weekday === weekday);
+    if (!openingHour) {
+      return res.status(422).json({
+        error: {
+          code: 'outside_opening_hours',
+          message: 'Reservation outside opening hours'
+        }
+      });
+    }
+    const [openHour, openMinute] = openingHour.opens.split(':').map(Number);
+    const [closeHour, closeMinute] = openingHour.closes.split(':').map(Number);
+    const opensAt = DateTime.fromObject({
+      year: newStartsAt.year, month: newStartsAt.month, day: newStartsAt.day,
+      hour: openHour, minute: openMinute
+    }, { zone: restaurant.timezone });
+    const closesAt = DateTime.fromObject({
+      year: newStartsAt.year, month: newStartsAt.month, day: newStartsAt.day,
+      hour: closeHour, minute: closeMinute
+    }, { zone: restaurant.timezone });
+    if (newStartsAt < opensAt || newStartsAt >= closesAt) {
+      return res.status(422).json({
+        error: {
+          code: 'outside_opening_hours',
+          message: 'Reservation outside opening hours'
+        }
+      });
+    }
+    if (newEndsAt > closesAt) {
+      return res.status(422).json({
+        error: {
+          code: 'outside_opening_hours',
+          message: 'Reservation would end after closing'
+        }
+      });
+    }
+  }
+
+    // Occupancy: check each real change against all confirmed reservations
+    // (unchanged occurrences, other bookings, and any applied closures)
+    for (const p of planned) {
+      if (p.isNoOp) continue;
+      const { reservation, newStartsAt, newEndsAt } = p;
+      const tableSet: string[] = reservation.table_ids && reservation.table_ids.length > 0
+        ? reservation.table_ids
+        : [reservation.table_id];
+      const closureConflict = tableSet.some(tableId => closureBlocksTable(restaurant.id, tableId, newStartsAt, newEndsAt));
+      if (closureConflict) {
+        return res.status(409).json({
+          error: {
+            code: 'table_unavailable',
+            message: 'Table is not available at the requested time'
+          }
+        });
+      }
+      const conflict = Object.values(state.reservations).find(res => {
+        if (res.id === reservation.id || res.status !== 'confirmed') return false;
+        return tableSet.some(tableId => reservationOccupiesTable(res, tableId, newStartsAt, newEndsAt));
+      });
+      if (conflict) {
+      return res.status(409).json({
+        error: {
+          code: 'table_unavailable',
+          message: 'Table is not available at the requested time'
+        }
+      });
+    }
+  }
+
+  // Apply the changes atomically
+  let anyChanged = false;
+  for (const p of planned) {
+    if (p.isNoOp) continue;
+    const { reservation, newStartsAtLocal, newStartsAt, newEndsAt, policy } = p;
+    const changes: HistoryChange[] = [
+      { field: 'starts_at_local', from: reservation.starts_at_local, to: newStartsAtLocal }
+    ];
+    reservation.starts_at_local = newStartsAtLocal;
+    reservation.starts_at = newStartsAt.toISO({ suppressMilliseconds: true });
+    reservation.ends_at = newEndsAt.toISO({ suppressMilliseconds: true });
+    reservation.accepted_terms = policy;
+    reservation.revision += 1;
+    appendHistory(reservation, 'changed', changes);
+    anyChanged = true;
+  }
+
+  if (anyChanged) {
+    series.revision += 1;
+    state.restaurantRevisions[series.restaurant_id] =
+      (state.restaurantRevisions[series.restaurant_id] || 0) + 1;
+  }
+
+  // Build the current series response
+  const occurrences = series.occurrences.map((reference, index) => {
+    const reservation = getReservationByReference(reference);
+    return {
+      index,
+      reference,
+      exception: series.exceptions[reference] === true,
+      reservation: reservation ? serializeReservation(reservation) : null
+    };
+  });
+  const response = {
+    series_id: series.id,
+    revision: series.revision,
+    interval_weeks: series.interval_weeks,
+    occurrences
+  };
+
+  state.idempotencyKeys[`${userId}:${idempotencyKey}`] = {
+    userId,
+    body: JSON.stringify(req.body),
+    response
+  };
+
+  res.status(201).json(response);
 });
 
 app.get('/reservations', authenticate, (req, res) => {
@@ -2333,7 +3153,17 @@ app.patch('/reservations/:reference', authenticate, (req, res) => {
     });
   }
 
-  // Check for overlapping reservations on any table in the new set
+  // Check for overlapping reservations or applied closures on any table in the new set
+  const closureConflict = resultingTableSet.some(tableId => closureBlocksTable(restaurant.id, tableId, newStartsAt, endsAt));
+  if (closureConflict) {
+    return res.status(409).json({
+      error: {
+        code: 'table_unavailable',
+        message: 'Table is not available at the requested time'
+      }
+    });
+  }
+
   const reservationConflict = Object.values(state.reservations).find(res => {
     if (res.id === reservation.id || res.status !== 'confirmed') return false;
     return resultingTableSet.some(tableId => reservationOccupiesTable(res, tableId, newStartsAt, endsAt));
@@ -2538,10 +3368,20 @@ app.post('/reservation-moves', authenticate, (req, res) => {
       });
     }
     
-    // Check for overlapping reservations on any table in the current set
+    // Check for overlapping reservations or applied closures on any table in the current set
     const currentTableSet = reservation.table_ids && reservation.table_ids.length > 0
       ? reservation.table_ids
       : [reservation.table_id];
+    const closureConflict = currentTableSet.some(tableId => closureBlocksTable(restaurant.id, tableId, startsAt, endsAt));
+    if (closureConflict) {
+      return res.status(409).json({
+        error: {
+          code: 'table_unavailable',
+          message: 'Table is not available at the requested time'
+        }
+      });
+    }
+
     const reservationConflict = Object.values(state.reservations).find(res => {
       if (res.id === reservation.id || res.status !== 'confirmed') return false;
       return currentTableSet.some(tableId => reservationOccupiesTable(res, tableId, startsAt, endsAt));
@@ -2628,9 +3468,19 @@ app.post('/reservation-moves', authenticate, (req, res) => {
     }
 
     if (newTableSet) {
-      // Check if tables are available (no time conflict) using current reservation time
+      // Check if tables are available (no time conflict or closure) using current reservation time
       const currentStart = DateTime.fromISO(reservation.starts_at);
       const currentEnd = DateTime.fromISO(reservation.ends_at);
+      const closureConflict = newTableSet!.some(tableId => closureBlocksTable(restaurant.id, tableId, currentStart, currentEnd));
+      if (closureConflict) {
+        return res.status(409).json({
+          error: {
+            code: 'table_unavailable',
+            message: 'Table is not available at the requested time'
+          }
+        });
+      }
+
       const reservationConflict = Object.values(state.reservations).find(res => {
         if (res.id === reservation.id || res.status !== 'confirmed') return false;
         return newTableSet!.some(tableId => reservationOccupiesTable(res, tableId, currentStart, currentEnd));
