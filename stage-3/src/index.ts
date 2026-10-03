@@ -1684,7 +1684,8 @@ app.post('/series', authenticate, (req, res) => {
 
     // Occurrences 1..count-1
     for (let i = 1; i < count; i++) {
-      const targetDate = anchorStart.plus({ days: i * interval_weeks * 7 });
+      const anchorLocal = DateTime.fromISO(anchor.starts_at_local, { zone: restaurant.timezone });
+      const targetDate = anchorLocal.plus({ days: i * interval_weeks * 7 });
       const startsAtLocal = targetDate.toFormat('yyyy-MM-dd\'T\'HH:mm');
       const startsAt = DateTime.fromISO(startsAtLocal, { zone: restaurant.timezone });
       if (!startsAt.isValid) {
