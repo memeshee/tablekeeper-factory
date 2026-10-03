@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tablekeeper - Lookup Reservation</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; max-width: 600px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; }
+        input { padding: 8px; width: 100%; box-sizing: border-box; }
+        button { padding: 10px 15px; background-color: #007bff; color: white; border: none; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        .error { color: red; margin-top: 10px; }
+        .success { color: green; margin-top: 10px; }
+        .reservation-detail { margin-top: 20px; padding: 15px; border: 1px solid #ccc; }
+        .cancel-button { background-color: #dc3545; margin-left: 10px; }
+        .cancel-button:hover { background-color: #c82333; }
+    </style>
+</head>
+<body>
+    <h1>Tablekeeper - Lookup Reservation</h1>
+    
+    <div class="form-group">
+        <label for="lookup-reference-input">Reservation Reference:</label>
+        <input type="text" data-testid="lookup-reference-input" id="lookup-reference-input" placeholder="Enter your 6-character reference">
+    </div>
+    
+    <button data-testid="lookup-submit" id="lookup-submit">Lookup Reservation</button>
+    
+    <div data-testid="reservation-error" id="reservation-error" class="error" style="display:none;"></div>
+    
+    <div data-testid="reservation-detail" id="reservation-detail" class="reservation-detail" style="display:none;">
+        <h3>Reservation Details</h3>
+        <div data-testid="reservation-status" id="reservation-status"></div>
+        <div data-testid="reservation-tables" id="reservation-tables"></div>
+        <div id="reservation-time"></div>
+        <button data-testid="reservation-cancel-button" id="reservation-cancel-button" class="cancel-button">Cancel Reservation</button>
+    </div>
+    
+    <script>
+        // DOM Elements
+        const lookupReferenceInput = document.getElementById('lookup-reference-input');
+        const lookupSubmit = document.getElementById('lookup-submit');
+        const reservationError = document.getElementById('reservation-error');
+        const reservationDetail = document.getElementById('reservation-detail');
+        const reservationStatus = document.getElementById('reservation-status');
+        const reservationTables = document.getElementById('reservation-tables');
+        const reservationTime = document.getElementById('reservation-time');
+        const reservationCancelButton = document.getElementById('reservation-cancel-button');
+        
+        // Remove elements that should be dynamically inserted
+        if (reservationError.parentNode) reservationError.remove();
+        if (reservationDetail.parentNode) reservationDetail.remove();
+        
+        // Setup event listeners
+        lookupSubmit.addEventListener('click', lookupReservation);
+        reservationCancelButton.addEventListener('click', cancelReservation);
+        
+        // Lookup reservation function
+        async function lookupReservation() {
+            const reference = lookupReferenceInput.value.trim();
+            
+            if (!reference) {
+                // Insert error if not already present
+                if (!reservationError.parentNode) {
+                    document.querySelector('body').insertBefore(reservationError, document.querySelector('body').firstChild.nextSibling);
+                }
+                reservationError.textContent = 'Please enter a reservation reference';
+                reservationError.style.display = 'block';
+                return;
+            }
+            
+            if (reference.length < 6) {
+                // Insert error if not already present
+                if (!reservationError.parentNode) {
+                    document.querySelector('body').insertBefore(reservationError, document.querySelector('body').firstChild.nextSibling);
+                }
+                reservationError.textContent = 'Reservation reference must be at least 6 characters';
+                reservationError.style.display = 'block';
+                return;
+            }
+            
+            try {
+                const token = localStorage.getItem('token');
+                if (!token) {
+                    window.location.href = '/login';
+                    return;
+                }
+                
+                const response = await fetch(`/reservations/${reference}`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // Display reservation details
+                    reservationStatus.textContent = data.status;
+                    reservationTables.textContent = `Tables: ${data.table_ids ? data.table_ids.join(', ') : data.table_id}`;
+                    reservationTime.textContent = `Time: ${data.starts_at_local}`;
+                    
+                    // Insert detail if not already present
+                    if (!reservationDetail.parentNode) {
+                        document.querySelector('body').insertBefore(reservationDetail, document.querySelector('body').lastChild);
+                    }
+                    
+                    // Show cancel button only if not cancelled
+                    if (data.status !== 'cancelled') {
+                        reservationCancelButton.style.display = 'inline-block';
+                    } else {
+                        reservationCancelButton.style.display = 'none';
+                    }
+                    
+                    reservationDetail.style.display = 'block';
+                    reservationError.style.display = 'none';
+                } else {
+                    // Insert error if not already present
+                    if (!reservationError.parentNode) {
+                        document.querySelector('body').insertBefore(reservationError, document.querySelector('body').firstChild.nextSibling);
+                    }
+                    reservationError.textContent = data.error?.message || 'Reservation not found';
+                    reservationError.style.display = 'block';
+                    reservationDetail.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Error looking up reservation:', error);
+                // Insert error if not already present
+                if (!reservationError.parentNode) {
+                    document.querySelector('body').insertBefore(reservationError, document.querySelector('body').firstChild.nextSibling);
+                }
+                reservationError.textContent = 'Network error while looking up reservation';
+                reservationError.style.display = 'block';
+                reservationDetail.style.display = 'none';
+            }
+        }
+        
+        // Cancel reservation function
+        async function cancelReservation() {
+            const reference = lookupReferenceInput.value.trim();
+            
+            if (!reference) return;
+            
+            try {
+                const token = localStorage.getItem('token');
+                if (!token) {
+                    window.location.href = '/login';
+                    return;
+                }
+                
+                const response = await fetch(`/reservations/${reference}/cancel`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // Update UI to show cancelled status
+                    reservationStatus.textContent = data.status;
+                    reservationCancelButton.style.display = 'none';
+                    reservationError.style.display = 'none';
+                    
+                    // Remove the cancel button from DOM
+                    if (reservationCancelButton.parentNode) {
+                        reservationCancelButton.remove();
+                    }
+                } else {
+                    // Insert error if not already present
+                    if (!reservationError.parentNode) {
+                        document.querySelector('body').insertBefore(reservationError, document.querySelector('body').firstChild.nextSibling);
+                    }
+                    reservationError.textContent = data.error?.message || 'Failed to cancel reservation';
+                    reservationError.style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error cancelling reservation:', error);
+                // Insert error if not already present
+                if (!reservationError.parentNode) {
+                    document.querySelector('body').insertBefore(reservationError, document.querySelector('body').firstChild.nextSibling);
+                }
+                reservationError.textContent = 'Network error while cancelling reservation';
+                reservationError.style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>
