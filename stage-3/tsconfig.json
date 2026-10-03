@@ -1,0 +1,22 @@
+{
+  // Visit https://aka.ms/tsconfig to read more about this file
+  "compilerOptions": {
+    // Environment Settings
+    "module": "commonjs",
+    "target": "es2015",
+    "types": [],
+    
+    // Other Outputs
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    // Recommended Options
+    "strict": false,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "noUncheckedSideEffectImports": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+  }
+}

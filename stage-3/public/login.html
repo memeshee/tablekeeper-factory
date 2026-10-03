@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tablekeeper - Login</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; max-width: 400px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; }
+        input { padding: 8px; width: 100%; box-sizing: border-box; }
+        button { padding: 10px 15px; background-color: #007bff; color: white; border: none; cursor: pointer; width: 100%; }
+        button:hover { background-color: #0056b3; }
+        .error { color: red; margin-top: 10px; }
+        .success { color: green; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Tablekeeper - Login</h1>
+    
+    <div class="form-group">
+        <label for="login-email">Email:</label>
+        <input type="email" data-testid="login-email" id="login-email">
+    </div>
+    
+    <div class="form-group">
+        <label for="login-password">Password:</label>
+        <input type="password" data-testid="login-password" id="login-password">
+    </div>
+    
+    <button data-testid="login-submit" id="login-submit">Login</button>
+    
+    <div data-testid="auth-error" id="auth-error" class="error" style="display:none;"></div>
+    
+    <p><a href="/signup">Don't have an account? Sign up</a></p>
+    
+    <script>
+        // DOM Elements
+        const loginEmail = document.getElementById('login-email');
+        const loginPassword = document.getElementById('login-password');
+        const loginSubmit = document.getElementById('login-submit');
+        const authError = document.getElementById('auth-error');
+        
+        // Remove auth-error element that should be dynamically inserted
+        if (authError.parentNode) authError.remove();
+        
+        // Setup event listeners
+        loginSubmit.addEventListener('click', login);
+        
+        // Login function
+        async function login() {
+            const email = loginEmail.value;
+            const password = loginPassword.value;
+            
+            if (!email || !password) {
+                // Insert error if not already present
+                if (!authError.parentNode) {
+                    document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                }
+                authError.textContent = 'Please fill in all fields';
+                authError.style.display = 'block';
+                return;
+            }
+            
+            try {
+                const response = await fetch('/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email, password })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // Store token
+                    localStorage.setItem('token', data.token);
+                    // Redirect to home
+                    window.location.href = '/';
+                } else {
+                    // Insert error if not already present
+                    if (!authError.parentNode) {
+                        document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                    }
+                    authError.textContent = data.error?.message || 'Login failed';
+                    authError.style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error logging in:', error);
+                // Insert error if not already present
+                if (!authError.parentNode) {
+                    document.querySelector('body').insertBefore(authError, document.querySelector('body').firstChild.nextSibling);
+                }
+                authError.textContent = 'Network error during login';
+                authError.style.display = 'block';
+            }
+        }
+    </script>
+</body>
+</html>
