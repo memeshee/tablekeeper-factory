@@ -38,12 +38,15 @@
 - No status/summary posts in the build room: they burn model credit and the
   ~1000-message room cap. Commit reports only.
 
-## Track: Tablekeeper
+## Track: Tablekeeper (all four stages submitted)
 
-- Stage 1: 116/120 (4 parked edge cases: skipped-hour validation, fall-back
-  dedupe, cross-zone instants, moves batch).
-- Stage 2: browser UI over the stage-1 API (this folder).
-- Stages 3–4: policies/history/series, then replans/amendments.
+- Stage 1: JSON API — auth, availability, atomic idempotent bookings, moves, export/import.
+- Stage 2: browser UI over the stage-1 API (availability grid, booking, confirmation/lookup, stale-state recovery, combination booking).
+- Stage 3: effective-dated policies, truthful history, recurring series.
+- Stage 4: series amendments + atomic closure-replanning with an exhaustive optimal solver.
+- Each stage folder is a full copy-forward of the previous one; `room.json` (Tablekeeper
+  Build Room) is the main trail, with `room-factory-run.json` (first stage-1 room) and
+  `room-toy-loop.json` (toy rehearsal) alongside it. See README.md for the map.
 
 ## Repo layout
 
